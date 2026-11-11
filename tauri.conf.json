@@ -2,13 +2,24 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lightwarden",
   "mainBinaryName": "lightwarden",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "app.lightwarden",
-  "build": { "frontendDist": "ui" },
+  "build": {
+    "frontendDist": "ui"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "Lightwarden", "width": 1240, "height": 780, "minWidth": 880, "minHeight": 560, "center": true }
+      {
+        "label": "main",
+        "title": "Lightwarden",
+        "width": 1240,
+        "height": 780,
+        "minWidth": 880,
+        "minHeight": 560,
+        "center": true,
+        "dragDropEnabled": false
+      }
     ],
     "security": {
       "csp": "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
@@ -16,7 +27,48 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage",
+      "nsis",
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "shortDescription": "Gestionnaire de mots de passe compatible Bitwarden",
+    "category": "Utility",
+    "linux": {
+      "deb": {
+        "desktopTemplate": "packaging/linux.desktop.hbs"
+      },
+      "rpm": {
+        "desktopTemplate": "packaging/linux.desktop.hbs"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBMTI4NUJENUJFQjM3NDcKUldSSE4rdGJ2WVVTNmo3U1M3VmYrMDk0Tm9hVGlFNkdSVDhXdGlmK0t0aVByZXZmQ2dOU1krMEwK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

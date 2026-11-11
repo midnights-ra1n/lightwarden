@@ -1,10 +1,11 @@
-//! Bitwarden-compatible server API: prelogin, token (password grant, 2FA, new-device OTP), sync + decrypt.
+//! Bitwarden-compatible server API: login (2FA, new-device OTP), sync + decrypt, and vault writes.
 use crate::crypto::{master_key, master_password_hash, Kdf, Key};
-use crate::vault::{Item, Vault};
+use crate::vault::{Item, ItemInput, Vault};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use serde_json::{json, Value};
-use std::{collections::HashMap, time::Duration};
+use serde_json::{json, Map, Value};
+use std::{collections::{BTreeMap, HashMap}, time::Duration};
 
+#[derive(Clone)]
 pub struct Server {
     identity: String,
     api: String,
@@ -54,14 +55,41 @@ fn gs(v: &Value, k: &str) -> String { g(v, k).as_str().unwrap_or("").to_string()
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
 }
-
 fn net(e: ureq::Error) -> String { format!("Impossible de joindre le serveur ({e}).") }
 
 fn device_type() -> &'static str {
     if cfg!(target_os = "windows") { "6" } else if cfg!(target_os = "macos") { "7" } else { "8" }
 }
+// Servers hide newer item types (SSH keys) from clients that announce an older version.
+const CLIENT_VERSION: &str = "2025.10.0";
 
-pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending: Option<(Pending, &str)>) -> Result<Vault, LoginErr> {
+// Per item type: JSON section and its encrypted string fields (login URIs are handled apart).
+const LOGIN: &[&str] = &["username", "password", "totp"];
+const CARD: &[&str] = &["cardholderName", "brand", "number", "expMonth", "expYear", "code"];
+const IDENTITY: &[&str] = &["title", "firstName", "middleName", "lastName", "address1", "address2", "address3", "city", "state",
+    "postalCode", "country", "company", "email", "phone", "ssn", "username", "passportNumber", "licenseNumber"];
+const SSH: &[&str] = &["privateKey", "publicKey", "keyFingerprint"];
+fn section(kind: i64) -> Option<(&'static str, &'static [&'static str])> {
+    match kind {
+        1 => Some(("login", LOGIN)),
+        3 => Some(("card", CARD)),
+        4 => Some(("identity", IDENTITY)),
+        5 => Some(("sshKey", SSH)),
+        _ => None,
+    }
+}
+
+pub struct Session {
+    srv: Server,
+    access: String,
+    refresh: String,
+    key: Key,
+    ciphers: HashMap<String, Value>, // raw encrypted ciphers by id: edits only re-encrypt the fields we change
+    folder_ids: HashMap<String, String>, // decrypted path -> folder id
+    pub vault: Vault,
+}
+
+pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending: Option<(Pending, &str)>) -> Result<Session, LoginErr> {
     let email = email.trim().to_lowercase();
     let a = agent();
 
@@ -96,12 +124,13 @@ pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending
     let mut r = a.post(&format!("{}/connect/token", srv.identity))
         .header("Auth-Email", URL_SAFE_NO_PAD.encode(&email))
         .header("Bitwarden-Client-Name", "desktop")
+        .header("Bitwarden-Client-Version", CLIENT_VERSION)
         .header("Device-Type", device_type())
         .send_form(form.iter().map(|(k, v)| (*k, v.as_str()))).map_err(net)?;
     let status = r.status().as_u16();
     let tok: Value = r.body_mut().read_json().unwrap_or(Value::Null);
     if status != 200 {
-        let msg = gs(&g(&tok, "errorModel").clone(), "message");
+        let msg = gs(g(&tok, "errorModel"), "message");
         let desc = gs(&tok, "error_description");
         if msg.to_lowercase().contains("new device verification") {
             return Err(LoginErr::Need(Pending::DeviceOtp));
@@ -123,40 +152,211 @@ pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending
             "E-mail ou mot de passe maître incorrect.".to_string().into()
         } else { shown.into() });
     }
-    let access = gs(&tok, "access_token");
 
-    let mut r = a.get(&format!("{}/sync?excludeDomains=true", srv.api)).header("Authorization", &format!("Bearer {access}")).call().map_err(net)?;
-    if !r.status().is_success() {
-        return Err(format!("Synchronisation refusée (HTTP {}).", r.status().as_u16()).into());
-    }
-    let sync: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
-    let user_key = Key::stretch(&mk).unwrap_user_key(&gs(g(&sync, "profile"), "key"))?;
-    Ok(decrypt_vault(&sync, &user_key))
+    let mut s = Session {
+        srv: srv.clone(), access: gs(&tok, "access_token"), refresh: gs(&tok, "refresh_token"),
+        key: Key::stretch(&mk), // replaced by the user key in sync()
+        ciphers: HashMap::new(), folder_ids: HashMap::new(), vault: Vault::default(),
+    };
+    let v = s.call("GET", "/sync?excludeDomains=true", None)?;
+    s.key = s.key.unwrap_user_key(&gs(g(&v, "profile"), "key"))?;
+    s.load(&v);
+    Ok(s)
 }
 
-fn decrypt_vault(sync: &Value, uk: &Key) -> Vault {
-    let folders: HashMap<String, String> = g(sync, "folders").as_array().into_iter().flatten()
-        .filter_map(|f| Some((gs(f, "id"), uk.decrypt_string(&gs(f, "name")).ok()?))).collect();
-    let mut out = vec![];
-    for c in g(sync, "ciphers").as_array().into_iter().flatten() {
-        // shortcut: organization items need the org RSA key; skipped. Trashed items skipped.
-        if !g(c, "organizationId").is_null() || !g(c, "deletedDate").is_null() { continue; }
-        let key = match gs(c, "key") {
-            k if k.is_empty() => None,
-            k => match uk.unwrap_user_key(&k) { Ok(k) => Some(k), Err(_) => continue },
-        };
-        let k = key.as_ref().unwrap_or(uk);
-        let d = |v: &Value, f: &str| k.decrypt_string(&gs(v, f)).unwrap_or_default();
-        let login = g(c, "login");
-        let uri = g(login, "uris").as_array().and_then(|u| u.first()).map(|u| d(u, "uri")).unwrap_or_default();
-        out.push(Item {
-            kind: g(c, "type").as_i64().unwrap_or(1),
-            name: d(c, "name"), username: d(login, "username"), password: d(login, "password"), notes: d(c, "notes"), uri,
-            folder: folders.get(&gs(c, "folderId")).cloned().unwrap_or_default(),
-        });
+impl Session {
+    fn send(&self, m: &str, path: &str, body: Option<&Value>) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        let a = agent();
+        let url = format!("{}{}", self.srv.api, path);
+        let auth = format!("Bearer {}", self.access);
+        macro_rules! h { ($r:expr) => { $r.header("Authorization", &auth).header("Bitwarden-Client-Name", "desktop")
+            .header("Bitwarden-Client-Version", CLIENT_VERSION).header("Device-Type", device_type()) } }
+        match (m, body) {
+            ("GET", _) => h!(a.get(&url)).call(),
+            ("DELETE", _) => h!(a.delete(&url)).call(),
+            ("POST", Some(b)) => h!(a.post(&url)).send_json(b),
+            ("PUT", Some(b)) => h!(a.put(&url)).send_json(b),
+            ("POST", None) => h!(a.post(&url)).send_empty(),
+            _ => h!(a.put(&url)).send_empty(),
+        }
     }
-    out.sort_by_key(|i| i.name.to_lowercase());
-    Vault { folders: folders.into_values().collect(), items: out }
+
+    /// API call; refreshes the access token once on 401.
+    fn call(&mut self, m: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let mut r = self.send(m, path, body).map_err(net)?;
+        if r.status().as_u16() == 401 && !self.refresh.is_empty() {
+            self.refresh_token()?;
+            r = self.send(m, path, body).map_err(net)?;
+        }
+        let status = r.status().as_u16();
+        let v: Value = r.body_mut().read_json().unwrap_or(Value::Null);
+        if !(200..300).contains(&status) {
+            let msg = [gs(g(&v, "errorModel"), "message"), gs(&v, "message")].into_iter().find(|m| !m.is_empty()).unwrap_or_default();
+            return Err(format!("Le serveur a refusé l'opération (HTTP {status}). {msg}").trim().to_string());
+        }
+        Ok(v)
+    }
+
+    fn refresh_token(&mut self) -> Result<(), String> {
+        let mut r = agent().post(&format!("{}/connect/token", self.srv.identity))
+            .send_form([("grant_type", "refresh_token"), ("client_id", "desktop"), ("refresh_token", self.refresh.as_str())])
+            .map_err(net)?;
+        if !r.status().is_success() {
+            return Err("Session expirée : verrouillez puis reconnectez-vous.".into());
+        }
+        let t: Value = r.body_mut().read_json().map_err(|e| e.to_string())?;
+        self.access = gs(&t, "access_token");
+        if !gs(&t, "refresh_token").is_empty() { self.refresh = gs(&t, "refresh_token"); }
+        Ok(())
+    }
+
+    pub fn sync(&mut self) -> Result<(), String> {
+        let v = self.call("GET", "/sync?excludeDomains=true", None)?;
+        self.load(&v);
+        Ok(())
+    }
+
+    fn load(&mut self, v: &Value) {
+        let k = &self.key;
+        self.folder_ids = g(v, "folders").as_array().into_iter().flatten()
+            .filter_map(|f| Some((k.decrypt_string(&gs(f, "name")).ok()?, gs(f, "id")))).collect();
+        let names: HashMap<&str, &str> = self.folder_ids.iter().map(|(n, i)| (i.as_str(), n.as_str())).collect();
+        self.ciphers.clear();
+        let mut items = vec![];
+        for c in g(v, "ciphers").as_array().into_iter().flatten() {
+            // shortcut: organization items need the org RSA key; skipped. Trashed items skipped.
+            if !g(c, "organizationId").is_null() || !g(c, "deletedDate").is_null() { continue; }
+            let Ok(ck) = self.cipher_key(c) else { continue };
+            let d = |v: &Value, f: &str| ck.decrypt_string(&gs(v, f)).unwrap_or_default();
+            let kind = g(c, "type").as_i64().unwrap_or(1);
+            let mut data = BTreeMap::new();
+            if let Some((sec, fields)) = section(kind) {
+                let s = g(c, sec);
+                for f in fields { data.insert(f.to_string(), d(s, f)); }
+                if kind == 1 {
+                    let uri = g(s, "uris").as_array().and_then(|u| u.first()).map(|u| d(u, "uri")).unwrap_or_default();
+                    data.insert("uri".into(), uri);
+                }
+            }
+            data.retain(|_, v| !v.is_empty());
+            let id = gs(c, "id");
+            items.push(Item {
+                id: id.clone(), kind, name: d(c, "name"), notes: d(c, "notes"), data,
+                folder: names.get(gs(c, "folderId").as_str()).map(|s| s.to_string()).unwrap_or_default(),
+            });
+            self.ciphers.insert(id, c.clone());
+        }
+        items.sort_by_key(|i| i.name.to_lowercase());
+        let mut folders: Vec<String> = self.folder_ids.keys().cloned().collect();
+        folders.sort();
+        self.vault = Vault { folders, items };
+    }
+
+    fn cipher_key(&self, c: &Value) -> Result<Key, String> {
+        match gs(c, "key") {
+            k if k.is_empty() => Ok(self.key.clone()),
+            k => self.key.unwrap_user_key(&k),
+        }
+    }
+
+    /// Folder id for a path, creating the folder when only implied by children (or new). "" = no folder.
+    fn ensure_folder(&mut self, path: &str) -> Result<Value, String> {
+        let path = clean_path(path)?;
+        if path.is_empty() { return Ok(Value::Null); }
+        if let Some(id) = self.folder_ids.get(&path) { return Ok(json!(id)); }
+        let v = self.call("POST", "/folders", Some(&json!({ "name": self.key.encrypt(path.as_bytes()) })))?;
+        let id = gs(&v, "id");
+        self.folder_ids.insert(path, id.clone());
+        Ok(json!(id))
+    }
+
+    pub fn create_folder(&mut self, path: &str) -> Result<(), String> {
+        if clean_path(path)?.is_empty() { return Err("Nom de dossier vide.".into()); }
+        self.ensure_folder(path).map(|_| ())
+    }
+
+    /// Renames/moves a folder and all its subfolders (Bitwarden nesting is by name prefix).
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<(), String> {
+        let to = clean_path(to)?;
+        if to.is_empty() { return Err("Nom de dossier vide.".into()); }
+        if to == from { return Ok(()); }
+        if to.starts_with(&format!("{from}/")) { return Err("Impossible de déplacer un dossier dans lui-même.".into()); }
+        let prefix = format!("{from}/");
+        let targets: Vec<(String, String)> = self.folder_ids.iter()
+            .filter(|(n, _)| *n == from || n.starts_with(&prefix))
+            .map(|(n, id)| (format!("{to}{}", &n[from.len()..]), id.clone())).collect();
+        if targets.is_empty() { return Err("Dossier introuvable.".into()); }
+        for (name, id) in targets {
+            self.call("PUT", &format!("/folders/{id}"), Some(&json!({ "name": self.key.encrypt(name.as_bytes()) })))?;
+        }
+        Ok(())
+    }
+
+    /// Deletes a folder and its subfolders; the server moves their items to "no folder".
+    pub fn delete_folder(&mut self, path: &str) -> Result<(), String> {
+        let prefix = format!("{path}/");
+        let ids: Vec<String> = self.folder_ids.iter().filter(|(n, _)| *n == path || n.starts_with(&prefix)).map(|(_, id)| id.clone()).collect();
+        for id in ids { self.call("DELETE", &format!("/folders/{id}"), None)?; }
+        Ok(())
+    }
+
+    pub fn move_items(&mut self, ids: &[String], folder: &str) -> Result<(), String> {
+        let fid = self.ensure_folder(folder)?;
+        self.call("PUT", "/ciphers/move", Some(&json!({ "ids": ids, "folderId": fid }))).map(|_| ())
+    }
+
+    pub fn delete_item(&mut self, id: &str) -> Result<(), String> {
+        self.call("PUT", &format!("/ciphers/{id}/delete"), None).map(|_| ())
+    }
+
+    /// Creates or updates an item. Updates start from the raw cipher so fields this client
+    /// does not edit (custom fields, history, extra URIs, attachments…) are kept as they are.
+    pub fn save_item(&mut self, it: &ItemInput) -> Result<(), String> {
+        if it.name.trim().is_empty() { return Err("Le nom est obligatoire.".into()); }
+        let folder_id = self.ensure_folder(&it.folder)?;
+        let mut c = match &it.id {
+            Some(id) => self.ciphers.get(id).cloned().ok_or("Élément introuvable, synchronisez le coffre.")?,
+            None => json!({ "type": it.kind, "favorite": false, "reprompt": 0 }),
+        };
+        let k = self.cipher_key(&c)?;
+        let enc = |s: &str| if s.is_empty() { Value::Null } else { json!(k.encrypt(s.as_bytes())) };
+        let get = |f: &str| it.data.get(f).map(|s| s.as_str()).unwrap_or("");
+        let o = c.as_object_mut().ok_or("Élément invalide.")?;
+        o.insert("name".into(), enc(it.name.trim()));
+        o.insert("notes".into(), enc(&it.notes));
+        o.insert("folderId".into(), folder_id);
+        if let Some(rev) = o.get("revisionDate").cloned() { o.insert("lastKnownRevisionDate".into(), rev); }
+        if it.kind == 2 && o.get("secureNote").is_none_or(|v| v.is_null()) {
+            o.insert("secureNote".into(), json!({ "type": 0 }));
+        }
+        if let Some((sec, fields)) = section(it.kind) {
+            let s = o.entry(sec).or_insert_with(|| json!({}));
+            if s.is_null() { *s = json!({}); }
+            let s: &mut Map<String, Value> = s.as_object_mut().ok_or("Élément invalide.")?;
+            for f in fields { s.insert(f.to_string(), enc(get(f))); }
+            if it.kind == 1 {
+                let mut uris = s.get("uris").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+                match (get("uri"), uris.is_empty()) {
+                    ("", false) => { uris.remove(0); }
+                    ("", true) => {}
+                    (u, true) => uris.push(json!({ "uri": enc(u), "match": null })),
+                    (u, false) => { uris[0]["uri"] = enc(u); }
+                }
+                s.insert("uris".into(), json!(uris));
+            }
+        }
+        match &it.id {
+            Some(id) => self.call("PUT", &format!("/ciphers/{id}"), Some(&c)),
+            None => self.call("POST", "/ciphers", Some(&c)),
+        }.map(|_| ())
+    }
+}
+
+fn clean_path(p: &str) -> Result<String, String> {
+    let parts: Vec<&str> = p.split('/').map(str::trim).collect();
+    if parts.iter().all(|x| x.is_empty()) { return Ok(String::new()); }
+    if parts.iter().any(|x| x.is_empty()) { return Err("Nom de dossier invalide (« / » vide).".into()); }
+    Ok(parts.join("/"))
 }
 
 #[cfg(test)]
@@ -168,5 +368,11 @@ mod tests {
         assert_eq!(server(2, "https://vw.example.com/").ok().unwrap().api, "https://vw.example.com/api");
         assert!(server(2, "").is_err());
         assert_eq!(server(1, "").ok().unwrap().identity, "https://identity.bitwarden.eu");
+    }
+    #[test]
+    fn paths() {
+        assert_eq!(clean_path(" Perso / Banque ").unwrap(), "Perso/Banque");
+        assert_eq!(clean_path("").unwrap(), "");
+        assert!(clean_path("a//b").is_err());
     }
 }

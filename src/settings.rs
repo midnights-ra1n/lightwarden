@@ -29,10 +29,11 @@ pub struct GlobalSettings {
     pub quick_copy: bool,
     pub theme: i32, // 0 system, 1 light, 2 dark
     pub language: i32,
+    pub auto_update: bool, // download updates in the background and notify when ready
 }
 impl Default for GlobalSettings {
     fn default() -> Self {
-        Self { keep_background: true, autostart: false, hw_accel: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, theme: 2, language: 0 }
+        Self { keep_background: true, autostart: false, hw_accel: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, theme: 2, language: 0, auto_update: true }
     }
 }
 

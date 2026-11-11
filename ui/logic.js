@@ -4,7 +4,10 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ESC[c]);
 
   const tokens = (q) => String(q || '').toLowerCase().split(/\s+/).filter(Boolean);
-  const haystack = (it) => [it.name, it.username, it.uri, it.notes, it.folder].join('\n').toLowerCase();
+  // Secrets are never searched: typing part of a password must not reveal which item holds it.
+  const SECRET = new Set(['password', 'totp', 'number', 'code', 'ssn', 'passportNumber', 'licenseNumber', 'privateKey']);
+  const haystack = (it) => [it.name, it.notes, it.folder,
+    ...Object.entries(it.data || {}).filter(([k]) => !SECRET.has(k)).map(([, v]) => v)].join('\n').toLowerCase();
   const inFolder = (it, path) => !path || it.folder === path || it.folder.startsWith(path + '/');
 
   // A search looks through the whole vault (like KeePassXC); otherwise the selected folder applies.
@@ -73,6 +76,6 @@
     } catch { return ''; }
   }
 
-  const api = { esc, tokens, inFolder, filterItems, buildTree, flatten, highlight, host };
+  const api = { esc, SECRET, tokens, inFolder, filterItems, buildTree, flatten, highlight, host };
   if (typeof module !== 'undefined') module.exports = api; else root.L = api;
 })(this);

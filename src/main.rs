@@ -1,11 +1,13 @@
 mod api;
 mod crypto;
 mod settings;
+mod ssh;
+mod updater;
 mod vault;
 
 use serde::Serialize;
 use settings::{Account, AccountSettings, GlobalSettings, Store};
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
@@ -13,10 +15,11 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 
 struct App {
     store: Store,
-    sessions: HashMap<String, vault::Vault>, // email -> decrypted vault, memory only
+    sessions: HashMap<String, Arc<Mutex<api::Session>>>, // email -> unlocked session, memory only
     pending: Option<api::Pending>,
 }
 type S<'a> = State<'a, Mutex<App>>;
@@ -70,7 +73,92 @@ fn snapshot(s: S) -> Snapshot {
 #[tauri::command]
 fn vault(s: S) -> Option<vault::Vault> {
     let a = s.lock().unwrap();
-    a.sessions.get(&a.store.accounts.get(a.store.current)?.email).cloned()
+    let sess = a.sessions.get(&a.store.accounts.get(a.store.current)?.email)?;
+    let v = sess.lock().unwrap().vault.clone();
+    Some(v)
+}
+
+/// Runs a write on the current account's session (off the UI thread), then re-syncs and returns the fresh vault.
+async fn mutate(s: S<'_>, f: impl FnOnce(&mut api::Session) -> Result<(), String> + Send + 'static) -> Result<vault::Vault, String> {
+    let sess = {
+        let a = s.lock().unwrap();
+        let email = &a.store.accounts.get(a.store.current).ok_or("Aucun compte.")?.email;
+        a.sessions.get(email).cloned().ok_or("Coffre verrouillé.")?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut x = sess.lock().unwrap();
+        let res = f(&mut x);
+        x.sync()?; // even after a failure, so the UI shows the real server state
+        res.map(|_| x.vault.clone())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn sync_vault(s: S<'_>) -> Result<vault::Vault, String> { mutate(s, |_| Ok(())).await }
+#[tauri::command]
+async fn create_folder(path: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.create_folder(&path)).await }
+#[tauri::command]
+async fn rename_folder(from: String, to: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.rename_folder(&from, &to)).await }
+#[tauri::command]
+async fn delete_folder(path: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.delete_folder(&path)).await }
+#[tauri::command]
+async fn move_items(ids: Vec<String>, folder: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.move_items(&ids, &folder)).await }
+#[tauri::command]
+async fn save_item(item: vault::ItemInput, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.save_item(&item)).await }
+#[tauri::command]
+async fn delete_item(id: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.delete_item(&id)).await }
+
+fn auto_update(app: &AppHandle) -> bool {
+    app.state::<Mutex<App>>().lock().unwrap().store.global.auto_update
+}
+
+#[tauri::command]
+fn update_info(app: AppHandle) -> updater::Info { updater::info(&app) }
+#[tauri::command]
+async fn update_check(app: AppHandle) { let d = auto_update(&app); updater::check(app, d).await }
+#[tauri::command]
+fn update_install(app: AppHandle) { updater::begin_install(&app) }
+#[tauri::command]
+fn french() -> bool { updater::french() }
+
+#[tauri::command]
+fn ssh_parse(text: String, passphrase: String) -> Result<ssh::Parsed, String> { ssh::parse(&text, &passphrase) }
+#[tauri::command]
+fn ssh_generate() -> Result<ssh::Parsed, String> { ssh::generate() }
+
+fn ssh_dir() -> Option<std::path::PathBuf> {
+    directories::UserDirs::new().map(|d| d.home_dir().join(".ssh")).filter(|p| p.is_dir())
+}
+
+/// Native "open" dialog; returns (file name, content) of a small text file.
+#[tauri::command]
+async fn open_text_file(app: AppHandle) -> Result<Option<(String, String)>, String> {
+    let mut d = app.dialog().file().set_title("Importer une clé SSH");
+    if let Some(p) = ssh_dir() { d = d.set_directory(p); }
+    let Some(fp) = d.blocking_pick_file() else { return Ok(None) };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 1 << 20 {
+        return Err("Fichier trop volumineux pour une clé.".into());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|_| "Ce fichier n'est pas un fichier texte.".to_string())?;
+    Ok(Some((path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), text)))
+}
+
+/// Native "save" dialog; private keys are written owner-only (0600) on Unix, as ssh requires.
+#[tauri::command]
+async fn save_text_file(app: AppHandle, name: String, text: String, private: bool) -> Result<bool, String> {
+    let mut d = app.dialog().file().set_title("Exporter la clé").set_file_name(&name);
+    if let Some(p) = ssh_dir() { d = d.set_directory(p); }
+    let Some(fp) = d.blocking_save_file() else { return Ok(false) };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+    let _ = private;
+    use std::io::Write;
+    o.open(&path).and_then(|mut f| f.write_all(text.as_bytes())).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -180,7 +268,7 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
             (acc.server_kind, acc.server_url) = (kind, url);
             a.store.current = idx;
             a.store.save();
-            a.sessions.insert(email, v);
+            a.sessions.insert(email, Arc::new(Mutex::new(v)));
             a.pending = None;
             Ok(LoginOutcome::Ok)
         }
@@ -217,12 +305,21 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(Mutex::new(updater::Updater::default()))
         .manage(Mutex::new(App { store, sessions: HashMap::new(), pending: None }))
-        .invoke_handler(tauri::generate_handler![snapshot, vault, select_account, lock, remove_account, save_settings, copy, open_url, login])
+        .invoke_handler(tauri::generate_handler![
+            snapshot, vault, select_account, lock, remove_account, save_settings, copy, open_url, login,
+            sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
+            ssh_parse, ssh_generate, open_text_file, save_text_file,
+            update_info, update_check, update_install, french
+        ])
         .setup(move |app| {
             let menu = Menu::with_items(app, &[
                 &MenuItem::with_id(app, "open", "Ouvrir Lightwarden", true, None::<&str>)?,
                 &MenuItem::with_id(app, "lock", "Verrouiller tous les coffres", true, None::<&str>)?,
+                &MenuItem::with_id(app, "update", "Rechercher des mises à jour", true, None::<&str>)?,
                 &MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?,
             ])?;
             // macOS: template icon, the menu bar recolours it (white on dark, black on light).
@@ -240,6 +337,17 @@ fn main() {
                         app.state::<Mutex<App>>().lock().unwrap().sessions.clear();
                         let _ = app.emit("locked", ());
                     }
+                    "update" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let d = auto_update(&app);
+                            updater::check(app.clone(), d).await;
+                            match updater::info(&app).status {
+                                updater::Status::Available { .. } | updater::Status::Ready { .. } => updater::begin_install(&app),
+                                _ => show_main(&app),
+                            }
+                        });
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -249,6 +357,7 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            updater::start_background(app.handle().clone(), auto_update);
             Ok(())
         })
         .on_window_event(|w, e| {

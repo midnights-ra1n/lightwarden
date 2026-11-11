@@ -1,0 +1,148 @@
+# Push to `unstable` -> beta pre-release, push to `stable` -> stable release.
+# Versions are computed from tags + Conventional Commits (scripts/next-version.sh),
+# packages are signed for the in-app updater, and the channel manifest is only
+# switched once every platform has been uploaded (scripts/publish-release.sh).
+name: Release
+
+on:
+  push:
+    branches: [unstable, stable]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release # versions come from existing tags: never compute two at once
+  cancel-in-progress: false
+
+env:
+  TAURI_CLI: npx --yes @tauri-apps/cli@2.12.4
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      channel: ${{ steps.v.outputs.channel }}
+      release_id: ${{ steps.r.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          channel=$([ "$GITHUB_REF_NAME" = stable ] && echo stable || echo beta)
+          version=$(scripts/next-version.sh "$channel")
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "::error::$tag already exists"; exit 1; fi
+          prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          {
+            echo "## Lightwarden $version"
+            echo
+            git log --no-merges --format='- %s (%h)' ${prev:+$prev..}HEAD
+          } > notes.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - id: r
+        name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+          CHANNEL: ${{ steps.v.outputs.channel }}
+        run: |
+          pre=$([ "$CHANNEL" = beta ] && echo --prerelease || true)
+          gh release create "$TAG" --draft $pre --target "$GITHUB_SHA" --title "Lightwarden $VERSION" --notes-file notes.md
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id" | head -1)
+          [ -n "$id" ] || { echo "::error::draft release not found"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: macos-latest
+            target: universal-apple-darwin
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      LIGHTWARDEN_CHANNEL: ${{ needs.prepare.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Set version
+        shell: bash
+        run: |
+          node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync("tauri.conf.json"));c.version=process.env.VERSION;fs.writeFileSync("tauri.conf.json",JSON.stringify(c,null,2)+"\n")'
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+      - name: Pick bundles
+        id: b
+        shell: bash
+        run: |
+          b='${{ matrix.bundles }}'
+          # rpm refuses "-" in versions, so beta builds ship AppImage + deb only on Linux
+          if [ -z "$b" ]; then b=$([ "$LIGHTWARDEN_CHANNEL" = stable ] && echo appimage,deb,rpm || echo appimage,deb); fi
+          echo "args=--target ${{ matrix.target }} --bundles $b" >> "$GITHUB_OUTPUT"
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tauriScript: ${{ env.TAURI_CLI }}
+          args: ${{ steps.b.outputs.args }}
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish release and update channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
+          SHA: ${{ github.sha }}
+        run: scripts/publish-release.sh
+
+  cleanup:
+    # a failed build must not leave a half-filled draft behind
+    needs: [prepare, build, publish]
+    if: failure() && needs.prepare.outputs.release_id
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          R: repos/${{ github.repository }}/releases/${{ needs.prepare.outputs.release_id }}
+        run: |
+          # only ever delete an unpublished draft
+          if [ "$(gh api "$R" --jq .draft)" = true ]; then gh api -X DELETE "$R"; fi

@@ -3,10 +3,10 @@ const assert = require('assert');
 const L = require('../ui/logic.js');
 
 const items = [
-  { kind: 1, name: 'GitHub', username: 'dev', uri: 'https://github.com', notes: '', folder: 'Dev' },
-  { kind: 5, name: 'Serveur', username: 'root', uri: '', notes: 'clé ed25519', folder: 'Dev/SSH' },
-  { kind: 1, name: 'Banque', username: 'moi', uri: 'banque.fr', notes: '', folder: 'Perso/Finance' },
-  { kind: 2, name: 'Divers <b>', username: '', uri: '', notes: '', folder: '' },
+  { kind: 1, name: 'GitHub', notes: '', folder: 'Dev', data: { username: 'dev', uri: 'https://github.com', password: 'hunter2' } },
+  { kind: 5, name: 'Serveur', notes: 'clé ed25519', folder: 'Dev/SSH', data: { publicKey: 'ssh-ed25519 AAAA root@srv' } },
+  { kind: 1, name: 'Banque', notes: '', folder: 'Perso/Finance', data: { username: 'moi', uri: 'banque.fr' } },
+  { kind: 2, name: 'Divers <b>', notes: '', folder: '', data: {} },
 ];
 
 const tree = L.buildTree(['Dev', 'Dev/SSH', 'Vide'], items);
@@ -22,6 +22,8 @@ assert.strictEqual(L.filterItems(items, { folder: 'Dev', kind: 1, query: '' }).l
 assert.deepStrictEqual(L.filterItems(items, { folder: 'Dev', kind: 0, query: 'moi finance' }).map((i) => i.name), ['Banque']);
 assert.strictEqual(L.filterItems(items, { folder: '', kind: 0, query: 'ED25519' }).length, 1);
 
+assert.strictEqual(L.filterItems(items, { folder: '', kind: 0, query: 'hunter2' }).length, 0, 'passwords are not searchable');
+assert.strictEqual(L.filterItems(items, { folder: '', kind: 0, query: 'root@srv' }).length, 1);
 assert.strictEqual(L.highlight('GitHub', 'hub'), 'Git<mark>Hub</mark>');
 assert.strictEqual(L.highlight('<b>', ''), '&lt;b&gt;');
 assert.strictEqual(L.highlight('a<b', 'a'), '<mark>a</mark>&lt;b');
