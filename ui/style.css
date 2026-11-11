@@ -353,3 +353,23 @@ body.dnd .tree-row, body.dnd [data-drop] { transition: background .1s; }
 .upd .btn-row { margin: 0; }
 .upd .primary { height: 36px; padding: 0 14px; }
 .primary[disabled] { cursor: default; }
+
+/* ---------- PIN & SSH agent help ---------- */
+.pin-intro { margin: 0 0 14px; font-size: 13px; line-height: 1.5; }
+.modal-b .fld + .fld { margin-top: 12px; }
+#pin-err { margin-top: 10px; }
+.ssh-help { margin-top: 4px; }
+.ssh-help p { margin: 8px 0 6px; font-size: 13px; line-height: 1.5; }
+.ssh-help .hint { margin: 4px 0 0; line-height: 1.5; }
+.ssh-help code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", monospace; font-size: 12px; padding: 1px 5px; border-radius: 5px; background: var(--accent-soft); }
+.ssh-os { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 0 12px; }
+.ssh-os summary { cursor: pointer; padding: 10px 0; font-weight: 600; font-size: 13.5px; }
+.ssh-os[open] { padding-bottom: 10px; }
+.ssh-os summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.code { position: relative; }
+.code pre {
+  margin: 0; padding: 9px 40px 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg);
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-all; user-select: text;
+}
+.code .icon-btn { position: absolute; top: 6px; right: 6px; }

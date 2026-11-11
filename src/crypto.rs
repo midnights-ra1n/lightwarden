@@ -10,7 +10,7 @@ pub enum Kdf {
     Argon2id { iterations: u32, memory_mib: u32, parallelism: u32 },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Key {
     enc: [u8; 32],
     mac: [u8; 32],
@@ -60,6 +60,17 @@ impl Key {
         Ok(Key { enc: b[..32].try_into().unwrap(), mac: b[32..].try_into().unwrap() })
     }
 
+    /// Encrypts another key (enc || mac) under this one; the inverse of `unwrap_user_key`.
+    pub fn wrap(&self, inner: &Key) -> String {
+        self.encrypt(&[inner.enc, inner.mac].concat())
+    }
+
+    /// Key derived from a PIN (salt = account e-mail). Argon2id makes each guess cost ~64 MiB.
+    pub fn from_pin(pin: &str, email: &str) -> Result<Key, String> {
+        let kdf = Kdf::Argon2id { iterations: 3, memory_mib: 64, parallelism: 4 };
+        Ok(Key::stretch(&master_key(pin, email, &kdf)?))
+    }
+
     /// EncString type 2 with a fresh random IV.
     pub fn encrypt(&self, pt: &[u8]) -> String {
         let mut iv = [0u8; 16];
@@ -107,5 +118,9 @@ mod tests {
         let bad = e.replacen("|", "|AA", 1);
         assert!(k.decrypt_string(&bad).is_err());
         assert!(k.unwrap_user_key(&k.encrypt(&[1u8; 64])).is_ok());
+        let pk = Key::from_pin("1234", "a@b.c").unwrap();
+        let back = pk.unwrap_user_key(&pk.wrap(&k)).unwrap();
+        assert_eq!(back.decrypt_string(&k.encrypt(b"x")).unwrap(), "x");
+        assert!(Key::from_pin("1235", "a@b.c").unwrap().unwrap_user_key(&pk.wrap(&k)).is_err());
     }
 }

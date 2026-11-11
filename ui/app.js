@@ -89,7 +89,7 @@ let snap = null;      // accounts + settings from Rust
 let vault = null;     // { folders, items } of the current account, null when locked
 const st = {
   folder: '', kind: 0, query: '', list: [], selId: null,
-  adding: false, needCode: '', revealed: new Set(), tab: 0,
+  adding: false, needCode: '', revealed: new Set(), tab: 0, usePw: false,
   edit: null, dirty: false, // item being created/edited
 };
 const collapsed = new Set(store.get('collapsed', []));
@@ -107,7 +107,7 @@ function allFolderPaths() {
 async function refresh() {
   snap = await invoke('snapshot');
   vault = snap.accounts.length ? await invoke('vault') : null;
-  if (!vault) { st.edit = null; st.dirty = false; }
+  if (!vault) { st.edit = null; st.dirty = false; } else st.usePw = false;
   applyTheme();
   render();
 }
@@ -163,8 +163,10 @@ function render() {
   const app = $('#app');
   if (!vault || st.adding) {
     $('#shell')?.remove();
-    app.innerHTML = loginView();
-    bindLogin();
+    const acc = snap.accounts[snap.current];
+    const pin = !st.adding && acc?.pin && !st.usePw;
+    app.innerHTML = pin ? pinView(acc) : loginView();
+    pin ? bindPin() : bindLogin();
     return;
   }
   if (!$('#shell')) { app.innerHTML = shellView(); bindShell(); }
@@ -192,8 +194,72 @@ function loginView() {
       <input id="l-code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
     <div class="err" id="l-err" role="alert"></div>
     <button class="primary" id="l-go" type="submit">${adding ? 'Se connecter' : 'Déverrouiller'}</button>
+    ${!adding && acc.pin ? '<button type="button" class="ghost" id="l-pin">Utiliser le code PIN</button>' : ''}
     ${snap.accounts.length ? `<button type="button" class="ghost" id="l-other">${adding ? 'Annuler' : 'Changer de compte'}</button>` : ''}
   </form></div>`;
+}
+
+/* ---------- PIN unlock ---------- */
+function pinView(acc) {
+  return `<div class="login-wrap"><form class="login-card" id="login" autocomplete="off" novalidate>
+    <div class="logo">${SHIELD}</div>
+    <h1>Coffre verrouillé</h1>
+    <p class="muted">${esc(acc.email)}</p>
+    <label class="fld"><span class="fld-l">Code PIN</span>
+      <input id="p-pin" type="password" autocomplete="off" spellcheck="false"></label>
+    <div class="err" id="l-err" role="alert"></div>
+    <button class="primary" id="l-go" type="submit">Déverrouiller</button>
+    <button type="button" class="ghost" id="p-mp">Utiliser le mot de passe maître</button>
+    <button type="button" class="ghost" id="l-other">Changer de compte</button>
+  </form></div>`;
+}
+
+function bindPin() {
+  const form = $('#login');
+  $('#p-mp').onclick = () => { st.usePw = true; render(); };
+  $('#l-other').onclick = (e) => openAccountMenu(e.currentTarget);
+  $('#p-pin').focus();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('#l-go'), err = $('#l-err'), pin = $('#p-pin').value;
+    if (!pin) { $('#p-pin').focus(); return; }
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Déverrouillage…'; err.textContent = '';
+    try {
+      await invoke('unlock_pin', { pin });
+      Object.assign(st, { selId: null, query: '' });
+      await refresh();
+      return;
+    } catch (x) {
+      snap = await invoke('snapshot');
+      if (!account().pin) { render(); $('#l-err').textContent = String(x); return; } // too many tries: master password
+      err.textContent = String(x);
+    }
+    btn.disabled = false; btn.textContent = 'Déverrouiller';
+    $('#p-pin').select();
+  };
+}
+
+/** Create + confirm the PIN; resolves true once it is set. */
+function pinModal() {
+  return new Promise((resolve) => {
+    const m = modal(`<form id="m-form" novalidate><div class="modal-h"><h2>Définir un code PIN</h2></div>
+      <div class="modal-b"><p class="muted pin-intro">Le code PIN déverrouille ce coffre sans votre mot de passe maître. Après un redémarrage de Lightwarden, ou après 5 codes erronés, le mot de passe maître est demandé une fois.</p>
+        <label class="fld"><span class="fld-l">Code PIN</span><input id="pin1" type="password" autocomplete="off" spellcheck="false"></label>
+        <label class="fld"><span class="fld-l">Confirmer le code PIN</span><input id="pin2" type="password" autocomplete="off" spellcheck="false"></label>
+        <div class="err" id="pin-err" role="alert"></div></div>
+      <div class="modal-f"><button type="button" class="ghost" data-close>Annuler</button><button class="primary" type="submit" id="pin-ok">Définir le code PIN</button></div></form>`, 'sm', () => resolve(false));
+    const [a, b, err, ok] = ['#pin1', '#pin2', '#pin-err', '#pin-ok'].map((x) => m.querySelector(x));
+    a.focus();
+    m.querySelector('#m-form').onsubmit = async (e) => {
+      e.preventDefault();
+      err.textContent = '';
+      if ([...a.value].length < 4) { err.textContent = 'Le code PIN doit comporter au moins 4 caractères.'; a.focus(); return; }
+      if (a.value !== b.value) { err.textContent = 'Les deux codes PIN ne correspondent pas.'; b.select(); return; }
+      ok.disabled = true; ok.innerHTML = '<span class="spinner"></span>Définir le code PIN';
+      try { await invoke('set_pin', { pin: a.value }); finishModal(resolve, true); }
+      catch (x) { err.textContent = String(x); ok.disabled = false; ok.textContent = 'Définir le code PIN'; }
+    };
+  });
 }
 
 function bindLogin() {
@@ -210,6 +276,8 @@ function bindLogin() {
     pw.type = show ? 'text' : 'password';
     $('#l-reveal').innerHTML = ic(show ? 'eyeOff' : 'eye');
   };
+  const usePin = $('#l-pin');
+  if (usePin) usePin.onclick = () => { st.usePw = false; render(); };
   const other = $('#l-other');
   if (other) other.onclick = (e) => {
     if (st.adding) { st.adding = false; st.needCode = ''; render(); }
@@ -1054,6 +1122,7 @@ function openSettings() {
       + chk('global', 'hw_accel', "Utiliser l'accélération matérielle", 'Désactivez-la uniquement en cas de problèmes graphiques. Redémarrage requis.')
       + chk('global', 'ssh_agent', "Activer l'agent SSH", 'Signe les demandes SSH directement depuis votre coffre.')
       + sel('global', 'ssh_approval', "Demander une autorisation lors de l'utilisation de l'agent SSH", "Choisir comment gérer les demandes d'autorisation de l'agent SSH.")
+      + sshHelp()
       + chk('global', 'quick_copy', 'Afficher les actions de copie rapide dans le coffre')
       + sel('global', 'theme', 'Thème', "Modifier la couleur du thème de l'application.")
       + sel('global', 'language', 'Langue', 'Un redémarrage est requis.')],
@@ -1067,12 +1136,22 @@ function openSettings() {
     st.tab = +b.dataset.tab;
     $$('[data-tab]', m).forEach((x) => x.classList.toggle('on', x === b));
     m.querySelector('#tab-body').innerHTML = tabs[st.tab][1]();
-    bindUpdates();
+    bindUpdates(); bindSsh();
   };
-  bindUpdates();
+  bindUpdates(); bindSsh();
   m.onchange = async (e) => {
     const el = e.target;
     if (!el.dataset.k) return;
+    if (el.dataset.k === 'unlock_pin') {
+      if (el.checked) {
+        if (await pinModal()) { snap.account.unlock_pin = true; toast('Code PIN défini'); }
+        openSettings(); // the PIN dialog replaced the settings dialog
+      } else {
+        try { await invoke('set_pin', { pin: '' }); snap.account.unlock_pin = false; toast('Code PIN supprimé'); }
+        catch (x) { el.checked = true; toast(String(x), true); }
+      }
+      return;
+    }
     snap[el.dataset.scope][el.dataset.k] = el.type === 'checkbox' ? el.checked : +el.value;
     try { await invoke('save_settings', { global: snap.global, account: snap.account }); }
     catch (x) { toast(String(x), true); }
@@ -1131,6 +1210,64 @@ async function bindUpdates() {
 }
 
 listen('update-status', (e) => { if (updInfo) { updInfo.status = e.payload; paintUpdates(); } });
+
+/* ---------------- SSH agent (settings section) ---------------- */
+const SSH_OS = IS_MAC ? 'mac' : /Win/.test(navigator.platform) ? 'win' : 'linux';
+
+function sshHelp() {
+  const code = (t) => `<div class="code"><pre>${esc(t)}</pre><button type="button" class="icon-btn xs" data-copy="${esc(t)}" title="Copier">${ic('copy')}</button></div>`;
+  const os = (id, title, body) => `<details class="ssh-os" ${id === SSH_OS ? 'open' : ''}><summary>${title}</summary>${body}</details>`;
+  const unix = (rc) => `
+    <p><b>1.</b> Indiquez l'agent à SSH, pour toutes les connexions (terminal, Git, éditeurs…), en ajoutant au début de <code>~/.ssh/config</code> :</p>
+    ${code('Host *\n  IdentityAgent ~/.lightwarden-ssh-agent.sock')}
+    <p><b>2.</b> Pour que <code>ssh-add</code> et les autres outils le trouvent aussi, ajoutez à <code>${rc}</code> puis ouvrez un nouveau terminal :</p>
+    ${code('export SSH_AUTH_SOCK="$HOME/.lightwarden-ssh-agent.sock"')}`;
+  return `<div class="upd ssh-help" id="ssh-help"><div class="upd-h"><span class="fld-l">Configurer l'agent SSH</span></div>
+    <div class="upd-status" id="ssh-status"></div>
+    ${os('linux', 'Linux', unix('~/.bashrc</code> ou <code>~/.zshrc')
+      + `<p>Fish :</p>${code('set -Ux SSH_AUTH_SOCK $HOME/.lightwarden-ssh-agent.sock')}
+      <p>Applications graphiques lancées hors terminal : créez <code>~/.config/environment.d/lightwarden.conf</code> avec la ligne suivante, puis reconnectez-vous.</p>
+      ${code('SSH_AUTH_SOCK=${HOME}/.lightwarden-ssh-agent.sock')}
+      <p><b>3.</b> Vérifiez :</p>${code('ssh-add -L')}`)}
+    ${os('mac', 'macOS', unix('~/.zshrc')
+      + `<p>Applications graphiques lancées hors terminal (à refaire après chaque redémarrage) :</p>
+      ${code('launchctl setenv SSH_AUTH_SOCK "$HOME/.lightwarden-ssh-agent.sock"')}
+      <p><b>3.</b> Vérifiez :</p>${code('ssh-add -L')}`)}
+    ${os('win', 'Windows', `
+      <p><b>1.</b> Lightwarden remplace l'agent OpenSSH intégré à Windows. Désactivez ce service dans PowerShell <b>ouvert en administrateur</b> :</p>
+      ${code('Stop-Service ssh-agent; Set-Service ssh-agent -StartupType Disabled')}
+      <p><b>2.</b> Décochez puis recochez « Activer l'agent SSH » ci-dessus.</p>
+      <p><b>3.</b> Vérifiez dans un nouveau terminal :</p>${code('ssh-add -L')}
+      <p>Git for Windows utilise son propre ssh : faites-lui utiliser celui de Windows.</p>
+      ${code('git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"')}`)}
+    <p class="hint">Seuls les éléments de type <b>Clé SSH</b> des coffres déverrouillés sont proposés. Si tous les coffres sont verrouillés, Lightwarden s'ouvre et vous laisse une minute pour en déverrouiller un.
+      Avec beaucoup de clés, un serveur peut refuser la connexion (« Too many authentication failures ») : exportez la clé publique voulue et précisez-la par hôte dans <code>~/.ssh/config</code> avec <code>IdentityFile ~/.ssh/ma-cle.pub</code> et <code>IdentitiesOnly yes</code>.</p>
+  </div>`;
+}
+
+function paintSsh(s) {
+  const el = $('#ssh-status');
+  if (!el) return;
+  const [text, cls] = s.error ? [s.error, 'err'] : s.running ? [`Agent actif : ${s.address}`, 'ok'] : ["L'agent est désactivé.", ''];
+  el.textContent = text;
+  el.className = 'upd-status ' + cls;
+}
+
+async function bindSsh() {
+  const box = $('#ssh-help');
+  if (!box) return;
+  box.onclick = async (e) => {
+    const b = e.target.closest('[data-copy]');
+    if (!b) return;
+    // web clipboard first: invoke("copy") applies the "minimize on copy" / auto-clear settings meant for secrets
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast('Copié'); }
+    catch { copyText(b.dataset.copy, 'Commande'); } // WebKitGTK may refuse the web clipboard
+  };
+  try { paintSsh(await invoke('ssh_agent_status')); } catch { /* status stays empty */ }
+}
+
+listen('ssh-agent', (e) => paintSsh(e.payload));
+listen('ssh-unlock-request', () => toast('Une application demande une clé SSH : déverrouillez un coffre.'));
 
 /* ---------------- keyboard ---------------- */
 document.addEventListener('keydown', async (e) => {

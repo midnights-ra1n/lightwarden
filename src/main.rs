@@ -1,3 +1,4 @@
+mod agent;
 mod api;
 mod crypto;
 mod settings;
@@ -21,6 +22,28 @@ struct App {
     store: Store,
     sessions: HashMap<String, Arc<Mutex<api::Session>>>, // email -> unlocked session, memory only
     pending: Option<api::Pending>,
+    pin_keys: HashMap<String, String>, // email -> user key encrypted under the PIN-derived key, memory only
+    sealed: HashMap<String, (Arc<Mutex<api::Session>>, u8)>, // email -> locked session awaiting its PIN, failed tries
+}
+
+const PIN_TRIES: u8 = 5;
+
+impl App {
+    /// Locks one account. With a PIN armed the session is kept sealed (no key, no decrypted data) for PIN unlock.
+    fn lock_account(&mut self, email: &str) {
+        let Some(sess) = self.sessions.remove(email) else { return };
+        if self.pin_keys.contains_key(email) {
+            sess.lock().unwrap().seal();
+            self.sealed.insert(email.to_string(), (sess, 0));
+        }
+    }
+    fn forget_pin(&mut self, email: &str) {
+        self.pin_keys.remove(email);
+        self.sealed.remove(email);
+    }
+    fn current_email(&self) -> Result<String, String> {
+        Ok(self.store.accounts.get(self.store.current).ok_or("Aucun compte.")?.email.clone())
+    }
 }
 type S<'a> = State<'a, Mutex<App>>;
 
@@ -30,6 +53,7 @@ struct AccountView {
     server_kind: i32,
     server_url: String,
     unlocked: bool,
+    pin: bool, // locked, and unlockable with its PIN
     icons: String, // base URL of the favicon service for this server
 }
 
@@ -62,7 +86,7 @@ fn snapshot(s: S) -> Snapshot {
     Snapshot {
         accounts: a.store.accounts.iter().map(|x| AccountView {
             email: x.email.clone(), server_kind: x.server_kind, server_url: x.server_url.clone(),
-            unlocked: a.sessions.contains_key(&x.email), icons: icons_base(x),
+            unlocked: a.sessions.contains_key(&x.email), pin: a.sealed.contains_key(&x.email), icons: icons_base(x),
         }).collect(),
         current: a.store.current,
         global: a.store.global.clone(),
@@ -172,12 +196,86 @@ fn select_account(index: usize, s: S) {
 }
 
 #[tauri::command]
-fn lock(s: S) {
+fn lock(s: S, app: AppHandle) {
     let mut a = s.lock().unwrap();
-    if let Some(e) = a.store.accounts.get(a.store.current).map(|x| x.email.clone()) {
-        a.sessions.remove(&e);
+    if let Ok(e) = a.current_email() { a.lock_account(&e); }
+    agent::forget(&app);
+}
+
+fn lock_all(app: &AppHandle) {
+    let state = app.state::<Mutex<App>>();
+    let mut a = state.lock().unwrap();
+    for e in a.sessions.keys().cloned().collect::<Vec<_>>() { a.lock_account(&e); }
+    agent::forget(app);
+}
+
+/// Sets (non-empty) or removes (empty) the current account's PIN. Setting needs the vault unlocked.
+#[tauri::command]
+async fn set_pin(pin: String, s: S<'_>) -> Result<(), String> {
+    let (email, sess) = { let a = s.lock().unwrap(); let e = a.current_email()?; let x = a.sessions.get(&e).cloned(); (e, x) };
+    let armed = if pin.is_empty() { None } else {
+        if pin.chars().count() < 4 { return Err("Le code PIN doit comporter au moins 4 caractères.".into()); }
+        let sess = sess.ok_or("Déverrouillez le coffre pour définir un code PIN.")?;
+        let e2 = email.clone();
+        Some(tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+            let k = crypto::Key::from_pin(&pin, &e2)?;
+            let x = sess.lock().unwrap();
+            Ok((x.encrypt(&pin), x.wrap_key(&k)))
+        }).await.map_err(|e| e.to_string())??)
+    };
+    let mut a = s.lock().unwrap();
+    a.forget_pin(&email);
+    if let Some((_, wrapped)) = &armed { a.pin_keys.insert(email.clone(), wrapped.clone()); }
+    if let Some(x) = a.store.accounts.iter_mut().find(|x| x.email == email) {
+        x.settings.unlock_pin = armed.is_some();
+        x.pin = armed.map(|(p, _)| p).unwrap_or_default();
+    }
+    a.store.save();
+    Ok(())
+}
+
+#[tauri::command]
+async fn unlock_pin(pin: String, s: S<'_>) -> Result<(), String> {
+    const NEED_MP: &str = "Saisissez votre mot de passe maître.";
+    let (email, sess, wrapped) = {
+        let a = s.lock().unwrap();
+        let e = a.current_email()?;
+        let sess = a.sealed.get(&e).ok_or(NEED_MP)?.0.clone();
+        let w = a.pin_keys.get(&e).cloned().ok_or(NEED_MP)?;
+        (e, sess, w)
+    };
+    let e2 = email.clone();
+    let key = tauri::async_runtime::spawn_blocking(move || crypto::Key::from_pin(&pin, &e2)?.unwrap_user_key(&wrapped))
+        .await.map_err(|e| e.to_string())?;
+    let mut a = s.lock().unwrap();
+    if !a.sealed.contains_key(&email) { return Err(NEED_MP.into()); } // removed or unlocked meanwhile
+    match key {
+        Ok(k) => {
+            sess.lock().unwrap().unseal(k);
+            a.sealed.remove(&email);
+            a.sessions.insert(email, sess);
+            Ok(())
+        }
+        Err(_) => {
+            let tries = { let t = &mut a.sealed.get_mut(&email).unwrap().1; *t += 1; *t };
+            if tries >= PIN_TRIES {
+                a.forget_pin(&email); // re-armed by the next master-password unlock
+                return Err("Trop de tentatives : saisissez votre mot de passe maître.".into());
+            }
+            let left = PIN_TRIES - tries;
+            Err(format!("Code PIN incorrect ({left} essai{} restant{}).", if left > 1 { "s" } else { "" }, if left > 1 { "s" } else { "" }))
+        }
     }
 }
+
+/// After a master-password unlock: re-derives the PIN key from the stored encrypted PIN.
+fn arm_pin(sess: &api::Session, enc_pin: &str, email: &str) -> Option<String> {
+    let pin = sess.decrypt(enc_pin).ok()?;
+    Some(sess.wrap_key(&crypto::Key::from_pin(&pin, email).ok()?))
+}
+
+#[tauri::command]
+fn ssh_agent_status(app: AppHandle) -> agent::Status { agent::status(&app) }
 
 #[tauri::command]
 fn remove_account(s: S) {
@@ -186,6 +284,7 @@ fn remove_account(s: S) {
         let cur = a.store.current;
         let gone = a.store.accounts.remove(cur);
         a.sessions.remove(&gone.email);
+        a.forget_pin(&gone.email);
         a.store.current = 0;
         a.store.save();
     }
@@ -195,12 +294,20 @@ fn remove_account(s: S) {
 fn save_settings(global: GlobalSettings, account: AccountSettings, s: S, app: AppHandle) -> Result<(), String> {
     let mut a = s.lock().unwrap();
     let autostart_changed = a.store.global.autostart != global.autostart;
+    let agent_changed = a.store.global.ssh_agent != global.ssh_agent;
     a.store.global = global;
     let cur = a.store.current;
     if let Some(x) = a.store.accounts.get_mut(cur) {
+        let pin = x.settings.unlock_pin; // only set_pin changes it
         x.settings = account;
+        x.settings.unlock_pin = pin;
     }
     a.store.save();
+    if agent_changed {
+        drop(a);
+        agent::sync(&app);
+        a = s.lock().unwrap();
+    }
     if autostart_changed {
         let al = app.autolaunch();
         if a.store.global.autostart { al.enable() } else { al.disable() }.map_err(|e| e.to_string())?;
@@ -251,15 +358,29 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
         return Err("Saisissez l'e-mail et le mot de passe maître.".into());
     }
     let srv = api::server(kind, &url)?;
-    let (device_id, pending) = { let a = s.lock().unwrap(); (a.store.device_id.clone(), a.pending.clone()) };
+    let (device_id, pending, enc_pin) = {
+        let a = s.lock().unwrap();
+        let pin = a.store.accounts.iter().find(|x| x.email == email && x.settings.unlock_pin).map(|x| x.pin.clone()).unwrap_or_default();
+        (a.store.device_id.clone(), a.pending.clone(), pin)
+    };
     let e2 = email.clone();
-    let res = tauri::async_runtime::spawn_blocking(move || {
+    let (res, armed) = tauri::async_runtime::spawn_blocking(move || {
         let p = pending.filter(|_| !code.trim().is_empty()).map(|p| (p, code));
-        api::login(&srv, &e2, &password, &device_id, p.as_ref().map(|(p, c)| (p.clone(), c.as_str())))
+        let r = api::login(&srv, &e2, &password, &device_id, p.as_ref().map(|(p, c)| (p.clone(), c.as_str())));
+        let armed = r.as_ref().ok().filter(|_| !enc_pin.is_empty()).and_then(|v| arm_pin(v, &enc_pin, &e2));
+        (r, armed)
     }).await.map_err(|e| e.to_string())?;
     let mut a = s.lock().unwrap();
     match res {
         Ok(v) => {
+            a.forget_pin(&email);
+            match armed {
+                Some(w) => { a.pin_keys.insert(email.clone(), w); }
+                None => if let Some(x) = a.store.accounts.iter_mut().find(|x| x.email == email) {
+                    // PIN unreadable (e.g. the account key changed): turn PIN unlock off rather than leave it broken
+                    if x.settings.unlock_pin { x.settings.unlock_pin = false; x.pin.clear(); }
+                },
+            }
             let idx = match a.store.accounts.iter().position(|x| x.email == email) {
                 Some(i) => i,
                 None => { a.store.accounts.push(Account { email: email.clone(), ..Default::default() }); a.store.accounts.len() - 1 }
@@ -285,7 +406,7 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
     }
 }
 
-fn show_main(app: &AppHandle) {
+pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -308,12 +429,14 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(updater::Updater::default()))
-        .manage(Mutex::new(App { store, sessions: HashMap::new(), pending: None }))
+        .manage(Mutex::new(App { store, sessions: HashMap::new(), pending: None, pin_keys: HashMap::new(), sealed: HashMap::new() }))
+        .manage(Mutex::new(agent::Agent::default()))
         .invoke_handler(tauri::generate_handler![
             snapshot, vault, select_account, lock, remove_account, save_settings, copy, open_url, login,
             sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
             ssh_parse, ssh_generate, open_text_file, save_text_file,
-            update_info, update_check, update_install, french
+            update_info, update_check, update_install, french,
+            set_pin, unlock_pin, ssh_agent_status
         ])
         .setup(move |app| {
             let menu = Menu::with_items(app, &[
@@ -334,7 +457,7 @@ fn main() {
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app),
                     "lock" => {
-                        app.state::<Mutex<App>>().lock().unwrap().sessions.clear();
+                        lock_all(app);
                         let _ = app.emit("locked", ());
                     }
                     "update" => {
@@ -358,6 +481,7 @@ fn main() {
                 })
                 .build(app)?;
             updater::start_background(app.handle().clone(), auto_update);
+            agent::sync(app.handle());
             Ok(())
         })
         .on_window_event(|w, e| {

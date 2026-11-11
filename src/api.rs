@@ -86,6 +86,7 @@ pub struct Session {
     key: Key,
     ciphers: HashMap<String, Value>, // raw encrypted ciphers by id: edits only re-encrypt the fields we change
     folder_ids: HashMap<String, String>, // decrypted path -> folder id
+    raw: Value, // last /sync response (encrypted): lets a PIN unlock work offline
     pub vault: Vault,
 }
 
@@ -156,7 +157,7 @@ pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending
     let mut s = Session {
         srv: srv.clone(), access: gs(&tok, "access_token"), refresh: gs(&tok, "refresh_token"),
         key: Key::stretch(&mk), // replaced by the user key in sync()
-        ciphers: HashMap::new(), folder_ids: HashMap::new(), vault: Vault::default(),
+        ciphers: HashMap::new(), folder_ids: HashMap::new(), raw: Value::Null, vault: Vault::default(),
     };
     let v = s.call("GET", "/sync?excludeDomains=true", None)?;
     s.key = s.key.unwrap_user_key(&gs(g(&v, "profile"), "key"))?;
@@ -216,7 +217,27 @@ impl Session {
         Ok(())
     }
 
+    pub fn encrypt(&self, pt: &str) -> String { self.key.encrypt(pt.as_bytes()) }
+    pub fn decrypt(&self, s: &str) -> Result<String, String> { self.key.decrypt_string(s) }
+    /// The user key, encrypted under `k` (used for PIN unlock).
+    pub fn wrap_key(&self, k: &Key) -> String { k.wrap(&self.key) }
+
+    /// Drops every decrypted secret and the user key; the server tokens and encrypted data stay.
+    pub fn seal(&mut self) {
+        self.key = Key::default();
+        self.folder_ids.clear();
+        self.vault = Vault::default();
+    }
+
+    /// Restores the user key and re-decrypts the last synced data.
+    pub fn unseal(&mut self, key: Key) {
+        self.key = key;
+        let v = std::mem::take(&mut self.raw);
+        self.load(&v);
+    }
+
     fn load(&mut self, v: &Value) {
+        self.raw = v.clone();
         let k = &self.key;
         self.folder_ids = g(v, "folders").as_array().into_iter().flatten()
             .filter_map(|f| Some((k.decrypt_string(&gs(f, "name")).ok()?, gs(f, "id")))).collect();

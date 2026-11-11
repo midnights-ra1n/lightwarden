@@ -43,6 +43,8 @@ pub struct Account {
     pub server_kind: i32, // 0 bitwarden.com, 1 bitwarden.eu, 2 self-hosted
     pub server_url: String,
     pub settings: AccountSettings,
+    #[serde(default)]
+    pub pin: String, // the PIN, encrypted with the user key: re-arms PIN unlock after each master-password unlock
 }
 
 #[derive(Serialize, Deserialize, Default)]

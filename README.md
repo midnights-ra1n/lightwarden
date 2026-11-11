@@ -14,7 +14,8 @@
 - **Plusieurs comptes** à la fois, chacun avec ses propres réglages.
 - **Chiffrement de bout en bout** côté client (PBKDF2 / Argon2id, AES-CBC + HMAC), comme le client officiel.
 - **Édition complète** des éléments, dossiers imbriqués, glisser-déposer.
-- **Clés SSH** : import (y compris chiffrées) et génération.
+- **Clés SSH** : import (y compris chiffrées), génération et **agent SSH** intégré.
+- **Déverrouillage par code PIN**.
 - **Icône dans la barre système** : verrouiller tous les coffres en un clic, rester en arrière-plan.
 - **Thème clair / sombre**.
 - **Mises à jour automatiques** signées (voir plus bas).
@@ -30,6 +31,81 @@ Télécharger la dernière version depuis la page [Releases](https://github.com/
 | Linux | `.AppImage`, `.deb` ou `.rpm` |
 
 > macOS : l'application n'est pas notariée. Au premier lancement, faire clic droit → **Ouvrir**.
+
+## Déverrouillage par code PIN
+
+**Paramètres → Sécurité → Déverrouiller avec un code PIN** : choisissez puis confirmez un code
+(4 caractères minimum). Le coffre verrouillé se rouvre ensuite avec ce code.
+
+- La clé du coffre est chiffrée avec une clé dérivée du PIN (Argon2id, 64 Mio) et ne reste qu'en mémoire.
+- Après un redémarrage de Lightwarden, ou après 5 codes erronés, le mot de passe maître est demandé une fois.
+- Décocher l'option supprime le code PIN.
+
+## Agent SSH
+
+Lightwarden peut servir d'agent SSH : les éléments de type **Clé SSH** des coffres déverrouillés
+sont utilisables par `ssh`, `git`, etc., sans jamais écrire la clé privée sur le disque.
+
+Activez **Paramètres → Paramètres de l'application → Activer l'agent SSH**, puis configurez votre système
+(les mêmes instructions sont affichées dans l'application).
+
+### Linux et macOS
+
+L'agent écoute sur `~/.lightwarden-ssh-agent.sock`.
+
+1. Pour toutes les connexions SSH (terminal, Git, éditeurs…), ajoutez au début de `~/.ssh/config` :
+
+   ```
+   Host *
+     IdentityAgent ~/.lightwarden-ssh-agent.sock
+   ```
+
+2. Pour `ssh-add` et les autres outils, ajoutez à `~/.bashrc` ou `~/.zshrc` (macOS : `~/.zshrc`) :
+
+   ```sh
+   export SSH_AUTH_SOCK="$HOME/.lightwarden-ssh-agent.sock"
+   ```
+
+   Fish : `set -Ux SSH_AUTH_SOCK $HOME/.lightwarden-ssh-agent.sock`
+
+   Applications graphiques lancées hors terminal :
+   - Linux : créez `~/.config/environment.d/lightwarden.conf` contenant
+     `SSH_AUTH_SOCK=${HOME}/.lightwarden-ssh-agent.sock`, puis reconnectez-vous ;
+   - macOS : `launchctl setenv SSH_AUTH_SOCK "$HOME/.lightwarden-ssh-agent.sock"` (à refaire après chaque redémarrage).
+
+3. Vérifiez avec `ssh-add -L`.
+
+### Windows
+
+L'agent utilise le canal nommé d'OpenSSH (`\\.\pipe\openssh-ssh-agent`) et remplace donc l'agent intégré à Windows.
+
+1. Dans PowerShell **ouvert en administrateur** :
+
+   ```powershell
+   Stop-Service ssh-agent; Set-Service ssh-agent -StartupType Disabled
+   ```
+
+2. Décochez puis recochez **Activer l'agent SSH**.
+3. Vérifiez avec `ssh-add -L` dans un nouveau terminal.
+4. Git for Windows utilise son propre `ssh` ; faites-lui utiliser celui de Windows :
+
+   ```powershell
+   git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"
+   ```
+
+### Bon à savoir
+
+- Clés prises en charge : Ed25519, ECDSA (P-256, P-384, P-521) et RSA (signatures `rsa-sha2-256` / `rsa-sha2-512`).
+- **Autorisation** : chaque utilisation peut être confirmée dans une fenêtre (toujours, une fois jusqu'au verrouillage, ou jamais).
+- Si tous les coffres sont verrouillés lors d'une demande, Lightwarden s'ouvre et laisse une minute pour en déverrouiller un.
+- Avec beaucoup de clés, un serveur peut répondre « Too many authentication failures ». Exportez la clé publique
+  voulue et précisez-la par hôte dans `~/.ssh/config` :
+
+  ```
+  Host github.com
+    IdentityFile ~/.ssh/github.pub
+    IdentitiesOnly yes
+  ```
 
 ## Mises à jour
 

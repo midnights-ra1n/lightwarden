@@ -973,6 +973,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -2571,9 +2572,12 @@ dependencies = [
  "hmac",
  "notify-rust",
  "pbkdf2",
+ "rsa",
  "serde",
  "serde_json",
  "sha2",
+ "signature",
+ "ssh-encoding",
  "ssh-key",
  "sys-locale",
  "tauri",
@@ -2584,6 +2588,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-winrt-notification",
+ "tokio",
  "ureq",
  "uuid",
 ]
