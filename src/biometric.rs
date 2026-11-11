@@ -28,6 +28,7 @@ mod sys {
 
 #[cfg(windows)]
 mod sys {
+    use windows_future::IAsyncOperation;
     use windows::{
         core::{factory, HSTRING},
         Security::Credentials::UI::{UserConsentVerificationResult as R, UserConsentVerifier, UserConsentVerifierAvailability},
@@ -44,7 +45,7 @@ mod sys {
         let e = |e: windows::core::Error| e.message();
         unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
         let interop = factory::<UserConsentVerifier, IUserConsentVerifierInterop>().map_err(e)?;
-        let op = unsafe { interop.RequestVerificationForWindowAsync(HWND(window as _), &HSTRING::from(reason)) }.map_err(e)?;
+        let op: IAsyncOperation<R> = unsafe { interop.RequestVerificationForWindowAsync(HWND(window as _), &HSTRING::from(reason)) }.map_err(e)?;
         match op.join().map_err(e)? {
             R::Verified => Ok(()),
             R::Canceled => Err("Authentification annulée.".into()),

@@ -57,6 +57,9 @@ keyring = { version = "3", features = ["apple-native"] }
 version = "0.62"
 features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_WinRT", "Win32_System_Com"]
 
+[target.'cfg(windows)'.dependencies.windows-future]
+version = "0.3"
+
 [target.'cfg(windows)'.dependencies.keyring]
 version = "3"
 features = ["windows-native"]

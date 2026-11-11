@@ -2612,6 +2612,7 @@ dependencies = [
  "ureq",
  "uuid",
  "windows",
+ "windows-future",
 ]
 
 [[package]]
