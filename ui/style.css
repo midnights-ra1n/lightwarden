@@ -254,7 +254,7 @@ kbd {
 .menu .ic { color: var(--muted); width: 16px; height: 16px; }
 .menu kbd { border: 0; background: none; padding: 0; }
 .menu .sep { height: 1px; margin: 5px 4px; background: var(--line); }
-.menu .av { width: 24px; height: 24px; font-size: 11px; }
+.menu .av, .menu button .av { width: 24px; height: 24px; flex: none; font-size: 11px; }
 .menu .sub { font-size: 11.5px; color: var(--muted); }
 .menu button:hover .sub { color: inherit; opacity: .8; }
 
@@ -373,3 +373,11 @@ body.dnd .tree-row, body.dnd [data-drop] { transition: background .1s; }
   white-space: pre-wrap; word-break: break-all; user-select: text;
 }
 .code .icon-btn { position: absolute; top: 6px; right: 6px; }
+
+/* about dialog */
+.about { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 28px 28px 24px; text-align: center; }
+.about h2 { margin: 6px 0 0; font-size: 22px; letter-spacing: -.01em; }
+.about-logo { width: 72px; height: 72px; border-radius: 18px; }
+.about-ver { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.about-links { display: flex; flex-direction: column; gap: 8px; width: 100%; margin: 14px 0 4px; }
+.about .primary { margin-top: 12px; min-width: 120px; }

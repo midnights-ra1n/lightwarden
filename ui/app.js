@@ -85,6 +85,7 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* per-viewer convenience only */ } },
 };
 
+let menuSig = '';
 let snap = null;      // accounts + settings from Rust
 let vault = null;     // { folders, items } of the current account, null when locked
 const st = {
@@ -106,6 +107,9 @@ function allFolderPaths() {
 /* ---------------- data ---------------- */
 async function refresh() {
   snap = await invoke('snapshot');
+  I18N.setLang(I18N.resolve(snap.global.language));
+  const sig = JSON.stringify([snap.current, snap.accounts.map((a) => a.email)]);
+  if (sig !== menuSig) { menuSig = sig; invoke('refresh_menu').catch(() => {}); }
   vault = snap.accounts.length ? await invoke('vault') : null;
   if (!vault) { st.edit = null; st.dirty = false; } else st.usePw = false;
   applyTheme();
@@ -542,7 +546,7 @@ function renderSidebar() {
   $('#tree').innerHTML = rows.length ? rows.map((r) =>
     `<div class="row tree-row ${r.path === st.folder ? 'sel' : ''}" style="--d:${r.depth}" data-path="${esc(r.path)}" data-drop="${esc(r.path)}" draggable="true" role="treeitem" aria-expanded="${r.hasChildren ? r.open : ''}">
       <button class="twist ${r.hasChildren ? '' : 'invisible'}" tabindex="-1">${ic(r.open ? 'chevDown' : 'chevRight')}</button>
-      ${ic(r.hasChildren && r.open ? 'folderOpen' : 'folder')}<span class="label">${esc(r.name)}</span><span class="count">${r.count || ''}</span></div>`).join('')
+      ${ic(r.hasChildren && r.open ? 'folderOpen' : 'folder')}<span class="label" translate="no">${esc(r.name)}</span><span class="count">${r.count || ''}</span></div>`).join('')
     : `<button class="row muted add-folder" id="b-firstfolder">${ic('folderPlus')}<span class="label">Créer un dossier</span></button>`;
   const first = $('#b-firstfolder');
   if (first) first.onclick = () => newFolder('');
@@ -591,9 +595,9 @@ function renderList() {
     <div class="item ${it.id === st.selId ? 'sel' : ''}" data-id="${esc(it.id)}" draggable="true" role="option" aria-selected="${it.id === st.selId}">
       ${favicon(it)}
       <div class="meta">
-        <div class="name">${L.highlight(it.name, st.query)}</div>
+        <div class="name" translate="no">${L.highlight(it.name, st.query)}</div>
         <div class="sub">${subline(it) || esc(kindOf(it.kind).one)}</div>
-        ${st.query && it.folder ? `<div class="path">${ic('folder')}${esc(it.folder)}</div>` : ''}
+        ${st.query && it.folder ? `<div class="path" translate="no">${ic('folder')}${esc(it.folder)}</div>` : ''}
       </div>
       ${quick && it.kind === 1 ? `<div class="quick">
         <button class="icon-btn sm" data-quick="u" title="Copier le nom d'utilisateur" ${it.data.username ? '' : 'disabled'}>${ic('user', 'sm')}</button>
@@ -635,7 +639,7 @@ function viewField(key, label, flags, value) {
   const secret = has(flags, 'secret'), multi = has(flags, 'multi'), shown = !secret || st.revealed.has(key);
   const display = !shown ? '••••••••••••' : (secret && !multi) ? colorPw(value) : esc(value);
   return `<div class="field ${multi ? 'multi' : ''}">
-    <div class="fv"><label>${label}</label><div class="val ${has(flags, 'mono') ? 'mono' : ''} ${multi && shown ? 'pre' : ''}">${display}</div></div>
+    <div class="fv"><label>${label}</label><div translate="no" class="val ${has(flags, 'mono') ? 'mono' : ''} ${multi && shown ? 'pre' : ''}">${display}</div></div>
     ${secret ? `<button class="icon-btn" data-act="reveal" data-k="${key}" title="${shown ? 'Masquer' : 'Afficher'}">${ic(shown ? 'eyeOff' : 'eye')}</button>` : ''}
     ${has(flags, 'link') ? `<button class="icon-btn" data-act="open" title="Ouvrir (${MOD}+U)">${ic('external')}</button>` : ''}
     <button class="icon-btn" data-act="copy" data-k="${key}" data-label="${esc(label)}" title="Copier">${ic('copy')}</button>
@@ -660,14 +664,14 @@ function renderDetail() {
       <button class="ghost" data-act="export-priv">${ic('download')}Exporter la clé privée</button>
       ${it.data.publicKey ? `<button class="ghost" data-act="export-pub">${ic('download')}Exporter la clé publique</button>` : ''}</div>` : '';
   d.innerHTML = `<div class="d-wrap">
-    <div class="d-head">${favicon(it, true)}<div class="grow"><h1>${esc(it.name)}</h1>
-      <div class="chips"><span class="chip">${ic(k.icon)}${k.one}</span>${it.folder ? `<span class="chip">${ic('folder')}${esc(it.folder)}</span>` : ''}</div></div>
+    <div class="d-head">${favicon(it, true)}<div class="grow"><h1 translate="no">${esc(it.name)}</h1>
+      <div class="chips"><span class="chip">${ic(k.icon)}${k.one}</span>${it.folder ? `<span class="chip" translate="no">${ic('folder')}${esc(it.folder)}</span>` : ''}</div></div>
       <div class="d-tools">
         <button class="ghost" data-act="edit" title="Modifier (${MOD}+E)">${ic('pencil')}Modifier</button>
         <button class="icon-btn" data-act="delete" title="Supprimer (Suppr)">${ic('trash')}</button>
       </div></div>
     ${groups}${sshActions}
-    ${it.notes ? `<div class="group"><div class="group-h">Notes</div><div class="notes">${esc(it.notes)}</div></div>` : ''}
+    ${it.notes ? `<div class="group"><div class="group-h">Notes</div><div class="notes" translate="no">${esc(it.notes)}</div></div>` : ''}
     ${!groups && !it.notes ? '<p class="muted">Cet élément est vide.</p>' : ''}
   </div>`;
   d.onclick = (e) => {
@@ -981,18 +985,20 @@ function openMenu(x, y, entries) {
 function closeMenu() { $('#menu').classList.add('hidden'); }
 const menuOpen = () => !$('#menu').classList.contains('hidden');
 
+async function switchAccount(i) {
+  if (!await leaveEdit()) return;
+  await invoke('select_account', { index: i });
+  Object.assign(st, { adding: false, needCode: '', folder: '', kind: 0, selId: null, query: '' });
+  await refresh();
+}
+
 function openAccountMenu(anchor) {
   const r = anchor.getBoundingClientRect();
   const entries = snap.accounts.map((a, i) => ({
     html: `<span class="av">${esc(a.email[0]?.toUpperCase() || '?')}</span>`,
     label: `${esc(a.email)}<div class="sub">${a.unlocked ? 'Déverrouillé' : 'Verrouillé'} · ${esc(serverLabel(a))}</div>`,
     kbd: i === snap.current ? '✓' : '',
-    run: async () => {
-      if (!await leaveEdit()) return;
-      await invoke('select_account', { index: i });
-      Object.assign(st, { adding: false, needCode: '', folder: '', kind: 0, selId: null, query: '' });
-      await refresh();
-    },
+    run: () => switchAccount(i),
   }));
   entries.push('-', { icon: 'plus', label: 'Ajouter un compte', run: async () => { if (await leaveEdit()) { st.adding = true; st.needCode = ''; render(); } } });
   if (snap.accounts.length) entries.push({ icon: 'logout', label: 'Retirer ce compte…', danger: true, run: removeAccount });
@@ -1043,7 +1049,7 @@ function selectModal(title, label, options, value, ok) {
   return new Promise((resolve) => {
     const m = modal(`<form id="m-form"><div class="modal-h"><h2>${esc(title)}</h2></div>
       <div class="modal-b"><label class="fld"><span class="fld-l">${esc(label)}</span><div class="select"><select id="m-in">
-        ${options.map(([v, l]) => `<option value="${esc(v)}" ${v === value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${ic('chevDown')}</div></label></div>
+        ${options.map(([v, l]) => `<option value="${esc(v)}" ${v ? 'translate="no"' : ''} ${v === value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${ic('chevDown')}</div></label></div>
       <div class="modal-f"><button type="button" class="ghost" data-close>Annuler</button><button class="primary" type="submit">${ok}</button></div></form>`, 'sm', () => resolve(null));
     const input = m.querySelector('#m-in');
     input.focus();
@@ -1351,6 +1357,51 @@ document.addEventListener('error', (e) => {
     box.innerHTML = ic(img.dataset.fb);
   }
 }, true);
+
+/* ---------------- About ---------------- */
+const REPO = 'https://github.com/midnights-ra1n/lightwarden';
+async function openAbout() {
+  let v = '';
+  try { v = (await invoke('update_info')).version; } catch { /* version is cosmetic */ }
+  const m = modal(`<div class="about">
+    <div class="logo about-logo">${SHIELD}</div>
+    <h2>Lightwarden</h2>
+    <span class="about-ver">${v ? 'v' + esc(v) : ''}</span>
+    <p class="muted">Gestionnaire de mots de passe compatible Bitwarden</p>
+    <div class="about-links">
+      <button class="ghost" data-url="${REPO}">${ic('external')}Code source sur GitHub</button>
+      <button class="ghost" data-url="${REPO}/issues">${ic('alert')}Signaler un problème</button>
+    </div>
+    <p class="hint">Client non officiel, indépendant de Bitwarden Inc.</p>
+    <button class="primary" data-close>Fermer</button></div>`, 'sm');
+  m.querySelectorAll('[data-url]').forEach((b) => b.onclick = () => invoke('open_url', { url: b.dataset.url }).catch((e) => toast(String(e), true)));
+  m.querySelector('.primary').focus();
+}
+
+/* ---------------- native menu bar (macOS) ---------------- */
+listen('menu', async (e) => {
+  const id = e.payload;
+  if (id === 'about') return openAbout();
+  const acct = /^acct:(\d+)$/.exec(id);
+  if (acct) { if (modalOpen()) closeModal(); return switchAccount(+acct[1]); }
+  if (!vault || st.adding) return;
+  if (modalOpen()) closeModal();
+  const kind = /^new:(\d)$/.exec(id);
+  if (kind) { if (await leaveEdit()) startNew(+kind[1]); return; }
+  const filter = /^kind:(\d)$/.exec(id);
+  if (filter) { $(`#kinds [data-kind="${filter[1]}"]`)?.click(); return; }
+  switch (id) {
+    case 'settings': return openSettings();
+    case 'shortcuts': return openShortcuts();
+    case 'sync': return doSync();
+    case 'lock': return doLock();
+    case 'new-folder': return newFolder(st.folder);
+    case 'search': { const q = $('#q'); q.focus(); q.select(); return; }
+    case 'add-account': if (await leaveEdit()) { st.adding = true; st.needCode = ''; render(); } return;
+    case 'remove-account': if (await leaveEdit()) removeAccount(); return;
+    case 'edit': return startEdit();
+  }
+});
 
 listen('locked', () => { Object.assign(st, { selId: null, edit: null, dirty: false }); refresh(); });
 refresh().catch((e) => { document.body.textContent = 'Erreur : ' + e; });

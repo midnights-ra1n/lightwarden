@@ -52,7 +52,7 @@
         "installMode": "currentUser"
       }
     },
-    "shortDescription": "Gestionnaire de mots de passe compatible Bitwarden",
+    "shortDescription": "Bitwarden-compatible password manager",
     "category": "Utility",
     "linux": {
       "deb": {

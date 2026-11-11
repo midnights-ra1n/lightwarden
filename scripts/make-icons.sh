@@ -3,7 +3,7 @@
 # Needs ImageMagick 7 (magick) with an SVG delegate, and python3.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-r() { magick -background none -density 400 "$1" -resize "$2x$2" -define png:color-type=6 "$3"; }
+r() { magick -background none -density 400 "$1" -resize "$2x$2" -depth 8 -define png:color-type=6 "$3"; }
 r assets/app-icon.svg 512 icons/icon.png
 r assets/app-icon.svg 128 icons/128x128.png
 r assets/app-icon.svg 32 icons/32x32.png

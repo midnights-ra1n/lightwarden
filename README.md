@@ -4,102 +4,111 @@
 
 <h1 align="center">Lightwarden</h1>
 
-<p align="center">Un client de bureau léger et natif pour Bitwarden, écrit en Rust avec Tauri.</p>
+<p align="center">A lightweight, native desktop client for Bitwarden, written in Rust with Tauri.</p>
 
 ---
 
-## Fonctionnalités
+## Features
 
-- **Compatible Bitwarden** : bitwarden.com, bitwarden.eu ou serveur auto-hébergé (Vaultwarden…).
-- **Plusieurs comptes** à la fois, chacun avec ses propres réglages.
-- **Chiffrement de bout en bout** côté client (PBKDF2 / Argon2id, AES-CBC + HMAC), comme le client officiel.
-- **Édition complète** des éléments, dossiers imbriqués, glisser-déposer.
-- **Clés SSH** : import (y compris chiffrées), génération et **agent SSH** intégré.
-- **Déverrouillage par code PIN**.
-- **Icône dans la barre système** : verrouiller tous les coffres en un clic, rester en arrière-plan.
-- **Thème clair / sombre**.
-- **Mises à jour automatiques** signées (voir plus bas).
+- **Bitwarden compatible**: bitwarden.com, bitwarden.eu or self-hosted servers (Vaultwarden…).
+- **Multiple accounts** at once, each with its own settings.
+- **End-to-end encryption** on the client (PBKDF2 / Argon2id, AES-CBC + HMAC), like the official client.
+- **Full item editing**, nested folders, drag and drop.
+- **SSH keys**: import (including encrypted ones), generation and a built-in **SSH agent**.
+- **PIN unlock**.
+- **Tray icon**: lock every vault in one click, keep running in the background.
+- **macOS menu bar** with vault, account, view and help menus.
+- **Light / dark theme**.
+- **Languages**: English and French (follows the system language, or pick one in Settings).
+- **Signed automatic updates** (see below).
 
 ## Installation
 
-Télécharger la dernière version depuis la page [Releases](https://github.com/midnights-ra1n/lightwarden/releases) :
+Download the latest version from the [Releases](https://github.com/midnights-ra1n/lightwarden/releases) page:
 
-| Système | Fichier |
+| System | File |
 |---|---|
 | Windows | `Lightwarden_x.y.z_x64-setup.exe` |
-| macOS (Intel et Apple Silicon) | `Lightwarden_x.y.z_universal.dmg` |
-| Linux | `.AppImage`, `.deb` ou `.rpm` |
+| macOS (Intel and Apple Silicon) | `Lightwarden_x.y.z_universal.dmg` |
+| Linux | `.AppImage`, `.deb` or `.rpm` |
 
-> macOS : l'application n'est pas notariée. Au premier lancement, faire clic droit → **Ouvrir**.
+> macOS: the app is not notarized. On first launch, right-click → **Open**.
 
-## Déverrouillage par code PIN
+## Language
 
-**Paramètres → Sécurité → Déverrouiller avec un code PIN** : choisissez puis confirmez un code
-(4 caractères minimum). Le coffre verrouillé se rouvre ensuite avec ce code.
+**Settings → App settings → Language**: *Default* (system language), *Français* or *English*.
+A restart is required. Interface text is French in the source; `ui/i18n.js` maps it to other
+languages, so adding one means adding a dictionary there (and an option in `SEL.language` in `ui/app.js`).
+Text inside `translate="no"` elements (vault data) is never translated.
 
-- La clé du coffre est chiffrée avec une clé dérivée du PIN (Argon2id, 64 Mio) et ne reste qu'en mémoire.
-- Après un redémarrage de Lightwarden, ou après 5 codes erronés, le mot de passe maître est demandé une fois.
-- Décocher l'option supprime le code PIN.
+## PIN unlock
 
-## Agent SSH
+**Settings → Security → Unlock with PIN**: choose and confirm a PIN (4 characters minimum).
+The locked vault can then be reopened with it.
 
-Lightwarden peut servir d'agent SSH : les éléments de type **Clé SSH** des coffres déverrouillés
-sont utilisables par `ssh`, `git`, etc., sans jamais écrire la clé privée sur le disque.
+- The vault key is encrypted with a key derived from the PIN (Argon2id, 64 MiB) and only kept in memory.
+- After Lightwarden restarts, or after 5 wrong PINs, the master password is asked for once.
+- Unticking the option removes the PIN.
 
-Activez **Paramètres → Paramètres de l'application → Activer l'agent SSH**, puis configurez votre système
-(les mêmes instructions sont affichées dans l'application).
+## SSH agent
 
-### Linux et macOS
+Lightwarden can act as an SSH agent: **SSH key** items of unlocked vaults can be used by `ssh`, `git`, etc.,
+without the private key ever being written to disk.
 
-L'agent écoute sur `~/.lightwarden-ssh-agent.sock`.
+Enable **Settings → App settings → Enable SSH agent**, then configure your system
+(the same instructions are shown in the app).
 
-1. Pour toutes les connexions SSH (terminal, Git, éditeurs…), ajoutez au début de `~/.ssh/config` :
+### Linux and macOS
+
+The agent listens on `~/.lightwarden-ssh-agent.sock`.
+
+1. For every SSH connection (terminal, Git, editors…), add this at the top of `~/.ssh/config`:
 
    ```
    Host *
      IdentityAgent ~/.lightwarden-ssh-agent.sock
    ```
 
-2. Pour `ssh-add` et les autres outils, ajoutez à `~/.bashrc` ou `~/.zshrc` (macOS : `~/.zshrc`) :
+2. For `ssh-add` and other tools, add this to `~/.bashrc` or `~/.zshrc` (macOS: `~/.zshrc`):
 
    ```sh
    export SSH_AUTH_SOCK="$HOME/.lightwarden-ssh-agent.sock"
    ```
 
-   Fish : `set -Ux SSH_AUTH_SOCK $HOME/.lightwarden-ssh-agent.sock`
+   Fish: `set -Ux SSH_AUTH_SOCK $HOME/.lightwarden-ssh-agent.sock`
 
-   Applications graphiques lancées hors terminal :
-   - Linux : créez `~/.config/environment.d/lightwarden.conf` contenant
-     `SSH_AUTH_SOCK=${HOME}/.lightwarden-ssh-agent.sock`, puis reconnectez-vous ;
-   - macOS : `launchctl setenv SSH_AUTH_SOCK "$HOME/.lightwarden-ssh-agent.sock"` (à refaire après chaque redémarrage).
+   GUI applications started outside a terminal:
+   - Linux: create `~/.config/environment.d/lightwarden.conf` containing
+     `SSH_AUTH_SOCK=${HOME}/.lightwarden-ssh-agent.sock`, then log in again;
+   - macOS: `launchctl setenv SSH_AUTH_SOCK "$HOME/.lightwarden-ssh-agent.sock"` (redo after each restart).
 
-3. Vérifiez avec `ssh-add -L`.
+3. Verify with `ssh-add -L`.
 
 ### Windows
 
-L'agent utilise le canal nommé d'OpenSSH (`\\.\pipe\openssh-ssh-agent`) et remplace donc l'agent intégré à Windows.
+The agent uses OpenSSH's named pipe (`\\.\pipe\openssh-ssh-agent`), so it replaces the agent built into Windows.
 
-1. Dans PowerShell **ouvert en administrateur** :
+1. In PowerShell **opened as administrator**:
 
    ```powershell
    Stop-Service ssh-agent; Set-Service ssh-agent -StartupType Disabled
    ```
 
-2. Décochez puis recochez **Activer l'agent SSH**.
-3. Vérifiez avec `ssh-add -L` dans un nouveau terminal.
-4. Git for Windows utilise son propre `ssh` ; faites-lui utiliser celui de Windows :
+2. Untick then tick **Enable SSH agent**.
+3. Verify with `ssh-add -L` in a new terminal.
+4. Git for Windows uses its own `ssh`; make it use the Windows one:
 
    ```powershell
    git config --global core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe"
    ```
 
-### Bon à savoir
+### Good to know
 
-- Clés prises en charge : Ed25519, ECDSA (P-256, P-384, P-521) et RSA (signatures `rsa-sha2-256` / `rsa-sha2-512`).
-- **Autorisation** : chaque utilisation peut être confirmée dans une fenêtre (toujours, une fois jusqu'au verrouillage, ou jamais).
-- Si tous les coffres sont verrouillés lors d'une demande, Lightwarden s'ouvre et laisse une minute pour en déverrouiller un.
-- Avec beaucoup de clés, un serveur peut répondre « Too many authentication failures ». Exportez la clé publique
-  voulue et précisez-la par hôte dans `~/.ssh/config` :
+- Supported keys: Ed25519, ECDSA (P-256, P-384, P-521) and RSA (`rsa-sha2-256` / `rsa-sha2-512` signatures).
+- **Approval**: each use can be confirmed in a dialog (always, once until the vault is locked, or never).
+- If every vault is locked when a request comes in, Lightwarden opens and gives you a minute to unlock one.
+- With many keys, a server may answer "Too many authentication failures". Export the public key you want
+  and set it per host in `~/.ssh/config`:
 
   ```
   Host github.com
@@ -107,65 +116,70 @@ L'agent utilise le canal nommé d'OpenSSH (`\\.\pipe\openssh-ssh-agent`) et remp
     IdentitiesOnly yes
   ```
 
-## Mises à jour
+## Updates
 
-Lightwarden recherche une mise à jour au lancement puis une fois par jour. Si l'option
-**Paramètres → Mettre à jour automatiquement** est active (par défaut), la mise à jour est
-téléchargée en arrière-plan et une notification prévient quand elle est prête ; un clic
-l'installe et relance l'application. Les boutons *Vérifier* et *Mettre à jour* des paramètres
-permettent de le faire manuellement.
+Lightwarden checks for an update at launch and then once a day. If
+**Settings → Update automatically** is on (the default), the update is downloaded in the background
+and a notification tells you when it is ready; one click installs it and restarts the app.
+The *Check for updates* and *Update* buttons in Settings do it manually.
 
-Chaque paquet est signé ; une mise à jour dont la signature ne correspond pas est refusée.
+Every package is signed; an update whose signature does not match is refused.
 
-Deux canaux :
+Two channels:
 
-- **stable** : versions finales (`1.2.0`).
-- **beta** : pré-versions (`1.3.0-beta.1`) ; les utilisateurs beta reçoivent aussi les nouvelles versions stables.
+- **stable**: final releases (`1.2.0`).
+- **beta**: pre-releases (`1.3.0-beta.1`); beta users also receive new stable versions.
 
-## Développement
+## Development
 
-Prérequis : Rust stable, Node.js, et sous Linux `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev`.
+Requirements: stable Rust, Node.js, and on Linux `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev`.
 
 ```sh
-npx @tauri-apps/cli dev     # lancer en mode développement
-npx @tauri-apps/cli build   # produire les paquets
+cargo install tauri-cli --version "^2" --locked
+cargo tauri dev                      # run in development mode
+cargo tauri build                    # produce packages
+cargo tauri build --bundles dmg -c '{"bundle":{"createUpdaterArtifacts":false}}'   # local macOS DMG, no signing key needed
 ```
 
-Les builds locaux sont sur le canal `dev` : la mise à jour automatique y est désactivée.
+Local builds are on the `dev` channel: automatic updates are disabled there.
 
-Tests :
+Icons are generated from `assets/*.svg` by `scripts/make-icons.sh` (needs ImageMagick 7). The PNGs must be
+8-bit RGBA, and Tauri embeds them at compile time: after changing an icon, `touch src/main.rs` to force a rebuild.
+
+Tests:
 
 ```sh
 cargo test
-node --test tests/logic.test.js
+node tests/logic.test.js
+node tests/i18n.test.js
 bash tests/next-version.test.sh
 bash tests/publish-newer.test.sh
 ```
 
-## Publier une version
+## Releasing
 
-| Branche | Rôle |
+| Branch | Role |
 |---|---|
-| `dev` | développement courant |
-| `unstable` | chaque push publie une **beta** |
-| `stable` | chaque push publie une **version stable** |
+| `dev` | day-to-day development |
+| `unstable` | every push publishes a **beta** |
+| `stable` | every push publishes a **stable release** |
 
-Le workflow `.github/workflows/release.yml` calcule la version à partir des messages de commit
-([Conventional Commits](https://www.conventionalcommits.org/fr/)) depuis la dernière version stable :
+The `.github/workflows/release.yml` workflow computes the version from commit messages
+([Conventional Commits](https://www.conventionalcommits.org/)) since the last stable release:
 
-- `fix: …` → correctif (`1.0.0` → `1.0.1`)
-- `feat: …` → mineure (`1.0.0` → `1.1.0`)
-- `feat!: …` ou `BREAKING CHANGE` → majeure (`1.0.0` → `2.0.0`)
+- `fix: …` → patch (`1.0.0` → `1.0.1`)
+- `feat: …` → minor (`1.0.0` → `1.1.0`)
+- `feat!: …` or `BREAKING CHANGE` → major (`1.0.0` → `2.0.0`)
 
-Une version plus haute écrite à la main dans `tauri.conf.json` est prioritaire.
+A higher version written by hand in `tauri.conf.json` takes precedence.
 
-Il compile pour Windows, macOS et Linux, signe les paquets, publie la release puis met à jour
-le canal lu par l'application (release `channels`, à ne pas supprimer).
+It builds for Windows, macOS and Linux, signs the packages, publishes the release and then updates
+the channel file read by the app (the `channels` release, do not delete it).
 
-Secrets GitHub nécessaires : `TAURI_SIGNING_PRIVATE_KEY` et `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-La clé publique correspondante est dans `tauri.conf.json` (`plugins.updater.pubkey`) ;
-**perdre la clé privée empêche toute mise à jour des installations existantes.**
+Required GitHub secrets: `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+The matching public key is in `tauri.conf.json` (`plugins.updater.pubkey`);
+**losing the private key makes it impossible to update existing installs.**
 
-## Licence
+## License
 
-Projet indépendant, non affilié à Bitwarden Inc.
+Independent project, not affiliated with Bitwarden Inc.

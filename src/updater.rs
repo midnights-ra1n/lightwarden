@@ -43,8 +43,15 @@ pub struct Info {
     pub status: Status,
 }
 
+/// UI language setting (0 system, 1 French, 2 English); set once at startup, changing it needs a restart.
+pub static LANG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub fn french() -> bool {
-    sys_locale::get_locale().is_some_and(|l| l.to_lowercase().starts_with("fr"))
+    match LANG.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => sys_locale::get_locale().is_some_and(|l| l.to_lowercase().starts_with("fr")),
+    }
 }
 
 fn set(app: &AppHandle, s: Status) {

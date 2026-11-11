@@ -11,7 +11,7 @@ use settings::{Account, AccountSettings, GlobalSettings, Store};
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
@@ -406,6 +406,139 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
     }
 }
 
+const REPO_URL: &str = "https://github.com/midnights-ra1n/lightwarden";
+
+fn tx(fr: &'static str, en: &'static str) -> &'static str { if updater::french() { fr } else { en } }
+
+/// Native macOS menu bar. Items prefixed `m:` are routed by `on_menu_bar`; most just forward to the UI.
+#[cfg(target_os = "macos")]
+fn menu_bar(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let mi = |id: &str, fr, en, accel: Option<&str>| MenuItem::with_id(app, format!("m:{id}"), tx(fr, en), true, accel);
+    let sep = || PredefinedMenuItem::separator(app);
+    let kinds = Submenu::with_items(app, tx("Nouvel élément", "New item"), true, &[
+        &mi("new:1", "Identifiant", "Login", None)?,
+        &mi("new:3", "Carte", "Card", None)?,
+        &mi("new:4", "Identité", "Identity", None)?,
+        &mi("new:2", "Note sécurisée", "Secure note", None)?,
+        &mi("new:5", "Clé SSH", "SSH key", None)?,
+    ])?;
+    let (emails, current) = {
+        let st = app.state::<Mutex<App>>();
+        let a = st.lock().unwrap();
+        (a.store.accounts.iter().map(|x| x.email.clone()).collect::<Vec<_>>(), a.store.current)
+    };
+    let accounts = emails.iter().enumerate()
+        .map(|(i, e)| CheckMenuItem::with_id(app, format!("m:acct:{i}"), e, true, i == current, None::<&str>))
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let mut account_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = accounts.iter().map(|x| x as _).collect();
+    let account_sep = sep()?;
+    if !accounts.is_empty() { account_items.push(&account_sep); }
+    let add = mi("add-account", "Ajouter un compte…", "Add Account…", None)?;
+    let remove = mi("remove-account", "Retirer ce compte…", "Remove This Account…", None)?;
+    let sep2 = sep()?;
+    let lock_all = mi("lock-all", "Verrouiller tous les coffres", "Lock All Vaults", None)?;
+    account_items.extend::<[&dyn tauri::menu::IsMenuItem<tauri::Wry>; 4]>([&add, &remove, &sep2, &lock_all]);
+    Menu::with_items(app, &[
+        &Submenu::with_items(app, "Lightwarden", true, &[
+            &mi("about", "À propos de Lightwarden", "About Lightwarden", None)?,
+            &mi("update", "Rechercher des mises à jour…", "Check for Updates…", None)?,
+            &sep()?,
+            &mi("settings", "Paramètres…", "Settings…", Some("CmdOrCtrl+,"))?,
+            &sep()?,
+            &PredefinedMenuItem::services(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::quit(app, None)?,
+        ])?,
+        &Submenu::with_items(app, tx("Coffre", "Vault"), true, &[
+            &kinds,
+            &mi("new-folder", "Nouveau dossier", "New Folder", Some("CmdOrCtrl+Shift+N"))?,
+            &sep()?,
+            &mi("edit", "Modifier l'élément", "Edit Item", Some("CmdOrCtrl+E"))?,
+            &mi("search", "Rechercher", "Search", Some("CmdOrCtrl+F"))?,
+            &sep()?,
+            &mi("sync", "Synchroniser", "Sync Vault", Some("CmdOrCtrl+R"))?,
+            &mi("lock", "Verrouiller", "Lock Vault", Some("CmdOrCtrl+L"))?,
+        ])?,
+        &Submenu::with_items(app, tx("Compte", "Account"), true, &account_items)?,
+        &Submenu::with_items(app, tx("Édition", "Edit"), true, &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ])?,
+        &Submenu::with_items(app, tx("Affichage", "View"), true, &[
+            &mi("kind:0", "Tous les éléments", "All Items", Some("CmdOrCtrl+1"))?,
+            &mi("kind:1", "Identifiants", "Logins", Some("CmdOrCtrl+2"))?,
+            &mi("kind:3", "Cartes", "Cards", Some("CmdOrCtrl+3"))?,
+            &mi("kind:4", "Identités", "Identities", Some("CmdOrCtrl+4"))?,
+            &mi("kind:2", "Notes sécurisées", "Secure Notes", Some("CmdOrCtrl+5"))?,
+            &mi("kind:5", "Clés SSH", "SSH Keys", Some("CmdOrCtrl+6"))?,
+            &sep()?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ])?,
+        &Submenu::with_id_and_items(app, WINDOW_SUBMENU_ID, tx("Fenêtre", "Window"), true, &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &sep()?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ])?,
+        &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, tx("Aide", "Help"), true, &[
+            &mi("shortcuts", "Raccourcis clavier", "Keyboard Shortcuts", Some("F1"))?,
+            &sep()?,
+            &mi("github", "Code source sur GitHub", "Source Code on GitHub", None)?,
+            &mi("issues", "Signaler un problème", "Report an Issue", None)?,
+        ])?,
+    ])
+}
+
+/// The account list in the menu bar is static: the UI calls this whenever accounts change.
+#[tauri::command]
+fn refresh_menu(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let a = app.clone();
+        let _ = app.run_on_main_thread(move || { if let Ok(m) = menu_bar(&a) { let _ = a.set_menu(m); } });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+fn update_from_menu(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let d = auto_update(&app);
+        updater::check(app.clone(), d).await;
+        match updater::info(&app).status {
+            updater::Status::Available { .. } | updater::Status::Ready { .. } => updater::begin_install(&app),
+            _ => show_main(&app),
+        }
+    });
+}
+
+fn on_menu_bar(app: &AppHandle, id: &str) {
+    let Some(id) = id.strip_prefix("m:") else { return };
+    match id {
+        "github" => { let _ = tauri_plugin_opener::open_url(REPO_URL, None::<&str>); }
+        "issues" => { let _ = tauri_plugin_opener::open_url(format!("{REPO_URL}/issues"), None::<&str>); }
+        "update" => update_from_menu(app),
+        "lock-all" => {
+            lock_all(app);
+            let _ = app.emit("locked", ());
+        }
+        _ => {
+            show_main(app);
+            let _ = app.emit("menu", id);
+        }
+    }
+}
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -421,6 +554,7 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
     let light_tray = store.global.theme == 1;
+    updater::LANG.store(store.global.language.clamp(0, 2) as u8, std::sync::atomic::Ordering::Relaxed);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
@@ -436,14 +570,14 @@ fn main() {
             sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
             ssh_parse, ssh_generate, open_text_file, save_text_file,
             update_info, update_check, update_install, french,
-            set_pin, unlock_pin, ssh_agent_status
+            set_pin, unlock_pin, ssh_agent_status, refresh_menu
         ])
         .setup(move |app| {
             let menu = Menu::with_items(app, &[
-                &MenuItem::with_id(app, "open", "Ouvrir Lightwarden", true, None::<&str>)?,
-                &MenuItem::with_id(app, "lock", "Verrouiller tous les coffres", true, None::<&str>)?,
-                &MenuItem::with_id(app, "update", "Rechercher des mises à jour", true, None::<&str>)?,
-                &MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?,
+                &MenuItem::with_id(app, "open", tx("Ouvrir Lightwarden", "Open Lightwarden"), true, None::<&str>)?,
+                &MenuItem::with_id(app, "lock", tx("Verrouiller tous les coffres", "Lock all vaults"), true, None::<&str>)?,
+                &MenuItem::with_id(app, "update", tx("Rechercher des mises à jour", "Check for updates"), true, None::<&str>)?,
+                &MenuItem::with_id(app, "quit", tx("Quitter", "Quit"), true, None::<&str>)?,
             ])?;
             // macOS: template icon, the menu bar recolours it (white on dark, black on light).
             // shortcut: elsewhere the colour follows the app theme, not the panel; applied at startup.
@@ -460,17 +594,7 @@ fn main() {
                         lock_all(app);
                         let _ = app.emit("locked", ());
                     }
-                    "update" => {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let d = auto_update(&app);
-                            updater::check(app.clone(), d).await;
-                            match updater::info(&app).status {
-                                updater::Status::Available { .. } | updater::Status::Ready { .. } => updater::begin_install(&app),
-                                _ => show_main(&app),
-                            }
-                        });
-                    }
+                    "update" => update_from_menu(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -480,10 +604,13 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu_bar(app.handle())?)?;
             updater::start_background(app.handle().clone(), auto_update);
             agent::sync(app.handle());
             Ok(())
         })
+        .on_menu_event(|app, e| on_menu_bar(app, e.id.as_ref()))
         .on_window_event(|w, e| {
             if let WindowEvent::CloseRequested { api, .. } = e {
                 if w.state::<Mutex<App>>().lock().unwrap().store.global.keep_background {
