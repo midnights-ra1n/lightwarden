@@ -38,11 +38,10 @@ for need in linux-x86_64 windows-x86_64 darwin-aarch64 darwin-x86_64; do
     || { echo "::error::no update package for $need"; exit 1; }
 done
 
-if [ "$CHANNEL" = stable ]; then
-  gh release edit "$TAG" -R "$REPO" --draft=false --prerelease=false --latest
-else
-  gh release edit "$TAG" -R "$REPO" --draft=false --prerelease --latest=false
-fi
+# by id: a leftover draft with the same tag must never be the one published
+stable=$([ "$CHANNEL" = stable ] && echo true || echo false)
+gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F draft=false -F prerelease=$([ "$stable" = true ] && echo false || echo true) \
+  -f make_latest="$stable" --jq .html_url
 
 # Channel manifests live on a fixed pre-release so the updater URL never changes.
 if ! gh release view channels -R "$REPO" >/dev/null 2>&1; then

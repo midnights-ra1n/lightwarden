@@ -28,7 +28,7 @@ jobs:
       channel: ${{ steps.v.outputs.channel }}
       release_id: ${{ steps.r.outputs.id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - id: v
@@ -54,10 +54,10 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
           CHANNEL: ${{ steps.v.outputs.channel }}
         run: |
-          pre=$([ "$CHANNEL" = beta ] && echo --prerelease || true)
-          gh release create "$TAG" --draft $pre --target "$GITHUB_SHA" --title "Lightwarden $VERSION" --notes-file notes.md
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id" | head -1)
-          [ -n "$id" ] || { echo "::error::draft release not found"; exit 1; }
+          # the API returns the id directly; listing releases right after creation is eventually consistent
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" \
+            -f name="Lightwarden $VERSION" -F body=@notes.md -F draft=true -F prerelease=$([ "$CHANNEL" = beta ] && echo true || echo false) --jq .id)
+          [ -n "$id" ] || { echo "::error::draft release not created"; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   build:
@@ -79,14 +79,14 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       LIGHTWARDEN_CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Linux build dependencies
@@ -123,7 +123,7 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Publish release and update channel
         env:
           GH_TOKEN: ${{ github.token }}
