@@ -30,7 +30,6 @@ mod sys {
 mod sys {
     use windows::{
         core::{factory, HSTRING},
-        Foundation::IAsyncOperation,
         Security::Credentials::UI::{UserConsentVerificationResult as R, UserConsentVerifier, UserConsentVerifierAvailability},
         Win32::{Foundation::HWND, System::{Com::{CoInitializeEx, COINIT_MULTITHREADED}, WinRT::IUserConsentVerifierInterop}},
     };
@@ -45,7 +44,7 @@ mod sys {
         let e = |e: windows::core::Error| e.message();
         unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
         let interop = factory::<UserConsentVerifier, IUserConsentVerifierInterop>().map_err(e)?;
-        let op: IAsyncOperation<R> = unsafe { interop.RequestVerificationForWindowAsync(HWND(window as _), &HSTRING::from(reason)) }.map_err(e)?;
+        let op = unsafe { interop.RequestVerificationForWindowAsync(HWND(window as _), &HSTRING::from(reason)) }.map_err(e)?;
         match op.join().map_err(e)? {
             R::Verified => Ok(()),
             R::Canceled => Err("Authentification annulée.".into()),
