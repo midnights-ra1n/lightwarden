@@ -1,0 +1,26 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<filter id="filter0_d_585_2" x="63.959" y="45.301" width="384.082" height="429.013" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dy="4"/>
+<feGaussianBlur stdDeviation="40"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.25 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_585_2"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_585_2" result="shape"/>
+</filter>
+<linearGradient id="paint0_linear_585_2" x1="57" y1="-8.50002" x2="625" y2="267" gradientUnits="userSpaceOnUse">
+<stop stop-color="#2A0072"/>
+<stop offset="1" stop-color="#3B5CFF"/>
+</linearGradient>
+<clipPath id="round"><rect width="512" height="512" rx="115.2"/></clipPath></defs>
+<g transform="translate(64 64) scale(0.75)">
+<g clip-path="url(#round)">
+<rect width="512" height="512" fill="url(#paint0_linear_585_2)"/>
+<g filter="url(#filter0_d_585_2)">
+<path d="M334.428 267.016V154.928H256V354.06C269.888 346.705 282.318 338.707 293.288 330.066C320.716 308.583 334.428 287.567 334.428 267.016ZM368.041 132.51V267.016C368.041 277.058 366.086 287.011 362.177 296.877C358.267 306.744 353.424 315.5 347.646 323.149C341.869 330.796 334.983 338.239 326.989 345.478C318.994 352.718 311.613 358.731 304.843 363.519C298.073 368.304 291.013 372.829 283.66 377.091C276.308 381.352 271.086 384.243 267.992 385.761C264.899 387.279 262.419 388.447 260.552 389.263C259.151 389.964 257.634 390.314 256 390.314C254.366 390.314 252.849 389.964 251.449 389.263C249.581 388.447 247.101 387.279 244.008 385.761C240.916 384.243 235.692 381.352 228.34 377.091C220.987 372.829 213.927 368.304 207.157 363.519C200.389 358.731 193.006 352.718 185.012 345.478C177.017 338.239 170.131 330.796 164.354 323.149C158.577 315.5 153.733 306.744 149.824 296.877C145.914 287.011 143.959 277.058 143.959 267.016V132.51C143.959 129.474 145.068 126.847 147.285 124.629C149.503 122.41 152.129 121.301 155.163 121.301H356.837C359.871 121.301 362.497 122.41 364.715 124.629C366.933 126.847 368.041 129.474 368.041 132.51Z" fill="white"/>
+</g>
+</g>
+</g>
+</svg>

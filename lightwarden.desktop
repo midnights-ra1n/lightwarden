@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lightwarden
+Comment=Gestionnaire de mots de passe compatible Bitwarden
+Exec=lightwarden
+Icon=lightwarden
+Categories=Utility;Security;
+StartupWMClass=lightwarden
