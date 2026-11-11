@@ -1,5 +1,6 @@
 mod agent;
 mod api;
+mod biometric;
 mod crypto;
 mod settings;
 mod ssh;
@@ -24,6 +25,7 @@ struct App {
     pending: Option<api::Pending>,
     pin_keys: HashMap<String, String>, // email -> user key encrypted under the PIN-derived key, memory only
     sealed: HashMap<String, (Arc<Mutex<api::Session>>, u8)>, // email -> locked session awaiting its PIN, failed tries
+    sys_keys: HashMap<String, String>, // email -> user key encrypted under the keychain secret, released by system authentication; memory only
 }
 
 const PIN_TRIES: u8 = 5;
@@ -31,21 +33,38 @@ const PIN_TRIES: u8 = 5;
 impl App {
     /// Locks one account. With a PIN armed the session is kept sealed (no key, no decrypted data) for PIN unlock.
     fn lock_account(&mut self, email: &str) {
+        if !self.sessions.contains_key(email) { return; }
+        self.persist();
         let Some(sess) = self.sessions.remove(email) else { return };
-        if self.pin_keys.contains_key(email) {
+        if self.pin_keys.contains_key(email) || self.sys_keys.contains_key(email) {
             sess.lock().unwrap().seal();
             self.sealed.insert(email.to_string(), (sess, 0));
         }
     }
     fn forget_pin(&mut self, email: &str) {
         self.pin_keys.remove(email);
-        self.sealed.remove(email);
+        if !self.sys_keys.contains_key(email) { self.sealed.remove(email); }
+    }
+    /// Mirrors the quick-unlock state to the settings file (the blob only for accounts unlocked right now).
+    fn persist(&mut self) {
+        for acc in &mut self.store.accounts {
+            acc.pin_key = self.pin_keys.get(&acc.email).cloned().unwrap_or_default();
+            acc.sys_key = self.sys_keys.get(&acc.email).cloned().unwrap_or_default();
+            if acc.pin_key.is_empty() && acc.sys_key.is_empty() { acc.blob.clear(); }
+            else if let Some(s) = self.sessions.get(&acc.email) { acc.blob = s.lock().unwrap().export(); }
+        }
+        self.store.save();
+    }
+    fn forget_unlock(&mut self, email: &str) {
+        self.sys_keys.remove(email);
+        self.forget_pin(email);
     }
     fn current_email(&self) -> Result<String, String> {
         Ok(self.store.accounts.get(self.store.current).ok_or("Aucun compte.")?.email.clone())
     }
 }
 type S<'a> = State<'a, Mutex<App>>;
+static BIOMETRIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 #[derive(Serialize)]
 struct AccountView {
@@ -54,6 +73,7 @@ struct AccountView {
     server_url: String,
     unlocked: bool,
     pin: bool, // locked, and unlockable with its PIN
+    system: bool, // locked, and unlockable with system authentication
     icons: String, // base URL of the favicon service for this server
 }
 
@@ -63,6 +83,7 @@ struct Snapshot {
     current: usize,
     global: GlobalSettings,
     account: AccountSettings,
+    biometric: bool, // this machine can do system authentication
 }
 
 #[derive(Serialize)]
@@ -86,11 +107,12 @@ fn snapshot(s: S) -> Snapshot {
     Snapshot {
         accounts: a.store.accounts.iter().map(|x| AccountView {
             email: x.email.clone(), server_kind: x.server_kind, server_url: x.server_url.clone(),
-            unlocked: a.sessions.contains_key(&x.email), pin: a.sealed.contains_key(&x.email), icons: icons_base(x),
+            unlocked: a.sessions.contains_key(&x.email), pin: a.sealed.contains_key(&x.email) && a.pin_keys.contains_key(&x.email), system: a.sealed.contains_key(&x.email) && a.sys_keys.contains_key(&x.email), icons: icons_base(x),
         }).collect(),
         current: a.store.current,
         global: a.store.global.clone(),
         account: a.store.accounts.get(a.store.current).map(|x| x.settings.clone()).unwrap_or_default(),
+        biometric: *BIOMETRIC.get_or_init(biometric::available),
     }
 }
 
@@ -104,13 +126,14 @@ fn vault(s: S) -> Option<vault::Vault> {
 
 /// Runs a write on the current account's session (off the UI thread), then re-syncs and returns the fresh vault.
 async fn mutate(s: S<'_>, f: impl FnOnce(&mut api::Session) -> Result<(), String> + Send + 'static) -> Result<vault::Vault, String> {
-    let sess = {
+    let (sess, cache) = {
         let a = s.lock().unwrap();
         let email = &a.store.accounts.get(a.store.current).ok_or("Aucun compte.")?.email;
-        a.sessions.get(email).cloned().ok_or("Coffre verrouillé.")?
+        (a.sessions.get(email).cloned().ok_or("Coffre verrouillé.")?, a.store.global.offline_cache)
     };
     tauri::async_runtime::spawn_blocking(move || {
         let mut x = sess.lock().unwrap();
+        if cache && x.offline { return Err("Serveur hors ligne : le coffre est en lecture seule.".into()); }
         let res = f(&mut x);
         x.sync()?; // even after a failure, so the UI shows the real server state
         res.map(|_| x.vault.clone())
@@ -118,7 +141,45 @@ async fn mutate(s: S<'_>, f: impl FnOnce(&mut api::Session) -> Result<(), String
 }
 
 #[tauri::command]
-async fn sync_vault(s: S<'_>) -> Result<vault::Vault, String> { mutate(s, |_| Ok(())).await }
+async fn sync_vault(s: S<'_>) -> Result<vault::Vault, String> {
+    let sess = {
+        let a = s.lock().unwrap();
+        a.sessions.get(&a.current_email()?).cloned().ok_or("Coffre verrouillé.")?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut x = sess.lock().unwrap();
+        x.sync()?; // clears the offline flag on success
+        Ok(x.vault.clone())
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Whether the current account is in read-only offline mode.
+#[tauri::command]
+fn offline_state(s: S) -> bool {
+    let a = s.lock().unwrap();
+    let Ok(e) = a.current_email() else { return false };
+    a.store.global.offline_cache && a.sessions.get(&e).is_some_and(|x| x.lock().unwrap().offline)
+}
+
+/// Every 15 s: probes each unlocked account's server. Going down flips it to read-only; coming back re-syncs it.
+fn watch_servers(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(15));
+        let list: Vec<_> = {
+            let state = app.state::<Mutex<App>>();
+            let a = state.lock().unwrap();
+            if !a.store.global.offline_cache { continue; }
+            a.sessions.iter().map(|(e, s)| (e.clone(), s.clone())).collect()
+        };
+        for (email, s) in list {
+            let (srv, was_off) = { let x = s.lock().unwrap(); (x.srv(), x.offline) };
+            let up = api::reachable(&srv);
+            if up == !was_off { continue; }
+            let off = if up { let mut x = s.lock().unwrap(); x.sync().is_err() && x.offline } else { s.lock().unwrap().offline = true; true };
+            if off != was_off { let _ = app.emit("net", email); }
+        }
+    });
+}
 #[tauri::command]
 async fn create_folder(path: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.create_folder(&path)).await }
 #[tauri::command]
@@ -230,7 +291,7 @@ async fn set_pin(pin: String, s: S<'_>) -> Result<(), String> {
         x.settings.unlock_pin = armed.is_some();
         x.pin = armed.map(|(p, _)| p).unwrap_or_default();
     }
-    a.store.save();
+    a.persist();
     Ok(())
 }
 
@@ -251,7 +312,7 @@ async fn unlock_pin(pin: String, s: S<'_>) -> Result<(), String> {
     if !a.sealed.contains_key(&email) { return Err(NEED_MP.into()); } // removed or unlocked meanwhile
     match key {
         Ok(k) => {
-            sess.lock().unwrap().unseal(k);
+            restore(&a, &email, &sess, k)?;
             a.sealed.remove(&email);
             a.sessions.insert(email, sess);
             Ok(())
@@ -266,6 +327,74 @@ async fn unlock_pin(pin: String, s: S<'_>) -> Result<(), String> {
             Err(format!("Code PIN incorrect ({left} essai{} restant{}).", if left > 1 { "s" } else { "" }, if left > 1 { "s" } else { "" }))
         }
     }
+}
+
+/// Unseals a session; after a restart it is an empty shell and first gets its token and data back from disk.
+fn restore(a: &App, email: &str, sess: &Mutex<api::Session>, key: crypto::Key) -> Result<(), String> {
+    let mut x = sess.lock().unwrap();
+    if x.is_shell() {
+        let blob = a.store.accounts.iter().find(|y| y.email == email).map(|y| y.blob.clone()).unwrap_or_default();
+        x.import(&blob, &key).map_err(|_| "Session expirée : saisissez votre mot de passe maître.".to_string())?;
+    }
+    x.unseal(key);
+    Ok(())
+}
+
+/// New keychain secret + the user key wrapped under it.
+fn arm_system(sess: &api::Session, email: &str) -> Result<String, String> {
+    Ok(sess.wrap_key(&crypto::Key::stretch(&biometric::new_secret(email)?)))
+}
+
+fn hwnd(w: &tauri::WebviewWindow) -> isize {
+    #[cfg(windows)]
+    { w.hwnd().map(|h| h.0 as isize).unwrap_or(0) }
+    #[cfg(not(windows))]
+    { let _ = w; 0 }
+}
+
+/// Turns system-authentication unlock on (asks for it once to prove it works) or off. Turning on needs the vault unlocked.
+#[tauri::command]
+async fn set_system(enable: bool, s: S<'_>, window: tauri::WebviewWindow) -> Result<(), String> {
+    let (email, sess) = { let a = s.lock().unwrap(); let e = a.current_email()?; let x = a.sessions.get(&e).cloned(); (e, x) };
+    let wrapped = if enable {
+        let sess = sess.ok_or("Déverrouillez le coffre pour activer l'authentification du système.")?;
+        let (e2, h) = (email.clone(), hwnd(&window));
+        Some(tauri::async_runtime::spawn_blocking(move || {
+            biometric::verify(tx("Activer le déverrouillage avec l'authentification du système", "Turn on unlocking with system authentication"), h)?;
+            arm_system(&sess.lock().unwrap(), &e2)
+        }).await.map_err(|e| e.to_string())??)
+    } else { biometric::clear_secret(&email); None };
+    let mut a = s.lock().unwrap();
+    match &wrapped {
+        Some(w) => { a.sys_keys.insert(email.clone(), w.clone()); }
+        None => { a.sys_keys.remove(&email); }
+    }
+    if let Some(x) = a.store.accounts.iter_mut().find(|x| x.email == email) { x.settings.unlock_system = wrapped.is_some(); }
+    a.persist();
+    Ok(())
+}
+
+#[tauri::command]
+async fn unlock_system(s: S<'_>, window: tauri::WebviewWindow) -> Result<(), String> {
+    const NEED_MP: &str = "Saisissez votre mot de passe maître.";
+    let (email, sess, wrapped) = {
+        let a = s.lock().unwrap();
+        let e = a.current_email()?;
+        let sess = a.sealed.get(&e).ok_or(NEED_MP)?.0.clone();
+        let w = a.sys_keys.get(&e).cloned().ok_or(NEED_MP)?;
+        (e, sess, w)
+    };
+    let (e2, h) = (email.clone(), hwnd(&window));
+    let key = tauri::async_runtime::spawn_blocking(move || {
+        biometric::verify(tx("Déverrouiller Lightwarden", "Unlock Lightwarden"), h)?;
+        crypto::Key::stretch(&biometric::secret(&e2)?).unwrap_user_key(&wrapped)
+    }).await.map_err(|e| e.to_string())??;
+    let mut a = s.lock().unwrap();
+    if !a.sealed.contains_key(&email) { return Err(NEED_MP.into()); } // unlocked or removed meanwhile
+    restore(&a, &email, &sess, key)?;
+    a.sealed.remove(&email);
+    a.sessions.insert(email, sess);
+    Ok(())
 }
 
 /// After a master-password unlock: re-derives the PIN key from the stored encrypted PIN.
@@ -284,7 +413,8 @@ fn remove_account(s: S) {
         let cur = a.store.current;
         let gone = a.store.accounts.remove(cur);
         a.sessions.remove(&gone.email);
-        a.forget_pin(&gone.email);
+        a.forget_unlock(&gone.email);
+        biometric::clear_secret(&gone.email);
         a.store.current = 0;
         a.store.save();
     }
@@ -298,9 +428,9 @@ fn save_settings(global: GlobalSettings, account: AccountSettings, s: S, app: Ap
     a.store.global = global;
     let cur = a.store.current;
     if let Some(x) = a.store.accounts.get_mut(cur) {
-        let pin = x.settings.unlock_pin; // only set_pin changes it
+        let (pin, sys) = (x.settings.unlock_pin, x.settings.unlock_system); // only set_pin / set_system change them
         x.settings = account;
-        x.settings.unlock_pin = pin;
+        (x.settings.unlock_pin, x.settings.unlock_system) = (pin, sys);
     }
     a.store.save();
     if agent_changed {
@@ -358,22 +488,29 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
         return Err("Saisissez l'e-mail et le mot de passe maître.".into());
     }
     let srv = api::server(kind, &url)?;
-    let (device_id, pending, enc_pin) = {
+    let (device_id, pending, enc_pin, want_sys) = {
         let a = s.lock().unwrap();
-        let pin = a.store.accounts.iter().find(|x| x.email == email && x.settings.unlock_pin).map(|x| x.pin.clone()).unwrap_or_default();
-        (a.store.device_id.clone(), a.pending.clone(), pin)
+        let acc = a.store.accounts.iter().find(|x| x.email == email);
+        let pin = acc.filter(|x| x.settings.unlock_pin).map(|x| x.pin.clone()).unwrap_or_default();
+        (a.store.device_id.clone(), a.pending.clone(), pin, acc.is_some_and(|x| x.settings.unlock_system))
     };
     let e2 = email.clone();
-    let (res, armed) = tauri::async_runtime::spawn_blocking(move || {
+    let (res, armed, sys_armed) = tauri::async_runtime::spawn_blocking(move || {
         let p = pending.filter(|_| !code.trim().is_empty()).map(|p| (p, code));
         let r = api::login(&srv, &e2, &password, &device_id, p.as_ref().map(|(p, c)| (p.clone(), c.as_str())));
         let armed = r.as_ref().ok().filter(|_| !enc_pin.is_empty()).and_then(|v| arm_pin(v, &enc_pin, &e2));
-        (r, armed)
+        let sys = r.as_ref().ok().filter(|_| want_sys).map(|v| arm_system(v, &e2));
+        (r, armed, sys)
     }).await.map_err(|e| e.to_string())?;
     let mut a = s.lock().unwrap();
     match res {
         Ok(v) => {
-            a.forget_pin(&email);
+            a.forget_unlock(&email);
+            match sys_armed {
+                Some(Ok(w)) => { a.sys_keys.insert(email.clone(), w); }
+                Some(Err(_)) => if let Some(x) = a.store.accounts.iter_mut().find(|x| x.email == email) { x.settings.unlock_system = false; },
+                None => {}
+            }
             match armed {
                 Some(w) => { a.pin_keys.insert(email.clone(), w); }
                 None => if let Some(x) = a.store.accounts.iter_mut().find(|x| x.email == email) {
@@ -390,6 +527,7 @@ async fn login(kind: i32, url: String, email: String, password: String, code: St
             a.store.current = idx;
             a.store.save();
             a.sessions.insert(email, Arc::new(Mutex::new(v)));
+            a.persist();
             a.pending = None;
             Ok(LoginOutcome::Ok)
         }
@@ -539,6 +677,8 @@ fn on_menu_bar(app: &AppHandle, id: &str) {
     }
 }
 
+const AUTOSTART_ARG: &str = "--autostart";
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -554,23 +694,36 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
     let light_tray = store.global.theme == 1;
+    let (start_hidden, autostart) = (store.global.start_hidden, store.global.autostart);
     updater::LANG.store(store.global.language.clamp(0, 2) as u8, std::sync::atomic::Ordering::Relaxed);
+
+    // quick unlock survives a restart: rebuild the locked sessions
+    let (mut sealed, mut pin_keys, mut sys_keys) = (HashMap::new(), HashMap::new(), HashMap::new());
+    for x in store.accounts.iter().filter(|x| !x.blob.is_empty() && !(x.pin_key.is_empty() && x.sys_key.is_empty())) {
+        let Ok(srv) = api::server(x.server_kind, &x.server_url) else { continue };
+        sealed.insert(x.email.clone(), (Arc::new(Mutex::new(api::Session::shell(srv))), 0u8));
+        if !x.pin_key.is_empty() { pin_keys.insert(x.email.clone(), x.pin_key.clone()); }
+        if !x.sys_key.is_empty() { sys_keys.insert(x.email.clone(), x.sys_key.clone()); }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![AUTOSTART_ARG])))
+        // size, position and maximized state of the main window; visibility is handled in setup
+        .plugin(tauri_plugin_window_state::Builder::default().with_denylist(&["update"])
+            .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::MAXIMIZED).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(updater::Updater::default()))
-        .manage(Mutex::new(App { store, sessions: HashMap::new(), pending: None, pin_keys: HashMap::new(), sealed: HashMap::new() }))
+        .manage(Mutex::new(App { store, sessions: HashMap::new(), pending: None, pin_keys, sealed, sys_keys }))
         .manage(Mutex::new(agent::Agent::default()))
         .invoke_handler(tauri::generate_handler![
             snapshot, vault, select_account, lock, remove_account, save_settings, copy, open_url, login,
             sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
             ssh_parse, ssh_generate, open_text_file, save_text_file,
             update_info, update_check, update_install, french,
-            set_pin, unlock_pin, ssh_agent_status, refresh_menu
+            offline_state, set_pin, unlock_pin, set_system, unlock_system, ssh_agent_status, refresh_menu
         ])
         .setup(move |app| {
             let menu = Menu::with_items(app, &[
@@ -606,8 +759,13 @@ fn main() {
                 .build(app)?;
             #[cfg(target_os = "macos")]
             app.set_menu(menu_bar(app.handle())?)?;
+            // The window is created hidden. Only a login-time launch honours "start minimized".
+            if !(start_hidden && std::env::args().any(|a| a == AUTOSTART_ARG)) { show_main(app.handle()); }
+            // entries written before this argument existed lack it
+            if autostart { let _ = app.autolaunch().enable(); }
             updater::start_background(app.handle().clone(), auto_update);
             agent::sync(app.handle());
+            watch_servers(app.handle().clone());
             Ok(())
         })
         .on_menu_event(|app, e| on_menu_bar(app, e.id.as_ref()))
@@ -619,6 +777,15 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Lightwarden");
+        .build(tauri::generate_context!())
+        .expect("error while building Lightwarden")
+        .run(|app, e| {
+            // keep the open sessions' latest sync for quick unlock after the next start
+            if let tauri::RunEvent::Exit = e { app.state::<Mutex<App>>().lock().unwrap().persist(); }
+            // macOS: a Dock click while the window is hidden only focuses the app, so show it
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = e { show_main(app); }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, e);
+        });
 }

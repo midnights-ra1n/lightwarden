@@ -111,7 +111,7 @@ async function refresh() {
   const sig = JSON.stringify([snap.current, snap.accounts.map((a) => a.email)]);
   if (sig !== menuSig) { menuSig = sig; invoke('refresh_menu').catch(() => {}); }
   vault = snap.accounts.length ? await invoke('vault') : null;
-  if (!vault) { st.edit = null; st.dirty = false; } else st.usePw = false;
+  if (!vault) { st.edit = null; st.dirty = false; } else { st.usePw = false; st.bioTried = null; }
   applyTheme();
   render();
 }
@@ -135,6 +135,7 @@ async function mutate(cmd, args, okMsg) {
     return false;
   } finally {
     document.body.classList.remove('busy');
+    await syncNet();
     if (vault && $('#shell')) { renderSidebar(); renderList(); }
   }
 }
@@ -148,6 +149,28 @@ function toast(msg, bad = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), bad ? 4000 : 1800);
 }
+
+/* ---------------- offline (read-only) ---------------- */
+function setOffline(v) {
+  st.offline = v;
+  document.body.classList.toggle('offline', v);
+  $('#offline')?.classList.toggle('hidden', !v);
+}
+const syncNet = async () => { try { setOffline(!!vault && await invoke('offline_state')); } catch { /* keep state */ } };
+/** True (with a hint) when writes are blocked because the server is unreachable. */
+function ro() {
+  if (!st.offline) return false;
+  toast('Serveur hors ligne : le coffre est en lecture seule', true);
+  return true;
+}
+listen('net', async (e) => {
+  if (!vault || e.payload !== account()?.email) return;
+  const was = st.offline;
+  await syncNet();
+  if (was === st.offline) return;
+  if (st.offline) toast('Serveur hors ligne : lecture seule', true);
+  else { try { vault = await invoke('vault') || vault; } catch { /* keep */ } if ($('#shell')) { renderSidebar(); renderList(); } toast('Connexion rétablie : coffre synchronisé'); }
+});
 
 async function copyText(text, label) {
   if (!text) return;
@@ -174,6 +197,7 @@ function render() {
     return;
   }
   if (!$('#shell')) { app.innerHTML = shellView(); bindShell(); }
+  syncNet();
   renderSidebar();
   renderList();
 }
@@ -198,6 +222,7 @@ function loginView() {
       <input id="l-code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"></label>
     <div class="err" id="l-err" role="alert"></div>
     <button class="primary" id="l-go" type="submit">${adding ? 'Se connecter' : 'Déverrouiller'}</button>
+    ${!adding && acc.system ? '<button type="button" class="ghost" id="l-bio">Déverrouiller avec l’authentification du système</button>' : ''}
     ${!adding && acc.pin ? '<button type="button" class="ghost" id="l-pin">Utiliser le code PIN</button>' : ''}
     ${snap.accounts.length ? `<button type="button" class="ghost" id="l-other">${adding ? 'Annuler' : 'Changer de compte'}</button>` : ''}
   </form></div>`;
@@ -213,12 +238,30 @@ function pinView(acc) {
       <input id="p-pin" type="password" autocomplete="off" spellcheck="false"></label>
     <div class="err" id="l-err" role="alert"></div>
     <button class="primary" id="l-go" type="submit">Déverrouiller</button>
+    ${acc.system ? '<button type="button" class="ghost" id="l-bio">Déverrouiller avec l’authentification du système</button>' : ''}
     <button type="button" class="ghost" id="p-mp">Utiliser le mot de passe maître</button>
     <button type="button" class="ghost" id="l-other">Changer de compte</button>
   </form></div>`;
 }
 
+/** System-authentication button of the lock screens; the OS dialog is the prompt. */
+function bindBio() {
+  const b = $('#l-bio');
+  if (!b) return;
+  const email = account().email;
+  if (st.bioTried !== email && document.visibilityState === 'visible') { st.bioTried = email; setTimeout(() => b.isConnected && b.click(), 150); } // once per lock
+  b.onclick = async () => {
+    b.disabled = true; $('#l-err').textContent = '';
+    try {
+      await invoke('unlock_system');
+      Object.assign(st, { selId: null, query: '' });
+      await refresh();
+    } catch (x) { $('#l-err').textContent = String(x); b.disabled = false; }
+  };
+}
+
 function bindPin() {
+  bindBio();
   const form = $('#login');
   $('#p-mp').onclick = () => { st.usePw = true; render(); };
   $('#l-other').onclick = (e) => openAccountMenu(e.currentTarget);
@@ -267,6 +310,7 @@ function pinModal() {
 }
 
 function bindLogin() {
+  bindBio();
   const form = $('#login');
   let kind = +form.querySelector('.seg .on').dataset.srv;
   $$('[data-srv]', form).forEach((b) => b.onclick = () => {
@@ -325,6 +369,7 @@ function shellView() {
           <button class="icon-btn xs" id="b-newfolder" title="Nouveau dossier (${MOD}+⇧+N)">${ic('plus')}</button></div>
         <div id="tree" role="tree"></div>
       </div>
+      <div class="offline-pill hidden" id="offline" role="status">${ic('alert')}Hors ligne · lecture seule</div>
       <div class="side-foot">
         <button class="ghost" id="b-lock" title="Verrouiller (${MOD}+L)">${ic('lock')}Verrouiller</button>
         <button class="icon-btn" id="b-sync" title="Synchroniser (${MOD}+R)">${ic('refresh')}</button>
@@ -379,8 +424,8 @@ function bindShell() {
     const row = e.target.closest('[data-path]');
     if (row) return openMenu(e.clientX, e.clientY, folderMenu(row.dataset.path));
     openMenu(e.clientX, e.clientY, [
-      { icon: 'folderPlus', label: 'Nouveau dossier', kbd: `${MOD}+⇧+N`, run: () => newFolder('') },
-      { icon: 'plus', label: 'Nouvel élément', kbd: `${MOD}+N`, run: () => openNewMenu(null, e.clientX, e.clientY) },
+      { icon: 'folderPlus', label: 'Nouveau dossier', kbd: `${MOD}+⇧+N`, run: () => newFolder(''), w: true },
+      { icon: 'plus', label: 'Nouvel élément', kbd: `${MOD}+N`, run: () => openNewMenu(null, e.clientX, e.clientY), w: true },
       '-',
       { icon: 'expand', label: 'Tout développer', run: expandAll },
       { icon: 'collapse', label: 'Tout réduire', run: collapseAll },
@@ -412,7 +457,7 @@ function bindShell() {
 
 /* ---------- menus content ---------- */
 function newItemEntries(folder = st.folder) {
-  return KINDS.filter((k) => k.k).map((k) => ({ icon: k.icon, label: k.one, run: () => startNew(k.k, folder) }));
+  return KINDS.filter((k) => k.k).map((k) => ({ icon: k.icon, label: k.one, run: () => startNew(k.k, folder), w: true }));
 }
 function openNewMenu(anchor, x, y) {
   if (anchor) { const r = anchor.getBoundingClientRect(); x = r.left; y = r.bottom + 6; }
@@ -434,19 +479,19 @@ function itemMenu(it) {
   m.push({ icon: 'type', label: 'Copier le nom', run: () => copyField(it, 'name', 'Nom') });
   if (it.notes) m.push({ icon: 'note', label: 'Copier les notes', run: () => copyField(it, 'notes', 'Notes') });
   m.push('-',
-    { icon: 'pencil', label: 'Modifier', kbd: `${MOD}+E`, run: startEdit },
-    { icon: 'folderInput', label: 'Déplacer vers…', run: () => moveDialog(it) },
-    { icon: 'trash', label: 'Supprimer', kbd: 'Suppr', danger: true, run: () => deleteItem(it) });
+    { icon: 'pencil', label: 'Modifier', kbd: `${MOD}+E`, run: startEdit, w: true },
+    { icon: 'folderInput', label: 'Déplacer vers…', run: () => moveDialog(it), w: true },
+    { icon: 'trash', label: 'Supprimer', kbd: 'Suppr', danger: true, run: () => deleteItem(it), w: true });
   return m;
 }
 
 function folderMenu(p) {
   const hasKids = allFolderPaths().some((x) => x.startsWith(p + '/'));
   return [
-    { icon: 'plus', label: 'Nouvel élément ici', run: () => { const r = $(`#tree [data-path="${CSS.escape(p)}"]`)?.getBoundingClientRect(); openMenu(r ? r.right - 40 : 200, r ? r.bottom : 200, newItemEntries(p)); } },
-    { icon: 'folderPlus', label: 'Nouveau sous-dossier', run: () => newFolder(p) },
-    { icon: 'pencil', label: 'Renommer', kbd: 'F2', run: () => renameFolder(p) },
-    { icon: 'trash', label: 'Supprimer', danger: true, run: () => deleteFolder(p) },
+    { icon: 'plus', label: 'Nouvel élément ici', w: true, run: () => { const r = $(`#tree [data-path="${CSS.escape(p)}"]`)?.getBoundingClientRect(); openMenu(r ? r.right - 40 : 200, r ? r.bottom : 200, newItemEntries(p)); } },
+    { icon: 'folderPlus', label: 'Nouveau sous-dossier', w: true, run: () => newFolder(p) },
+    { icon: 'pencil', label: 'Renommer', kbd: 'F2', w: true, run: () => renameFolder(p) },
+    { icon: 'trash', label: 'Supprimer', danger: true, w: true, run: () => deleteFolder(p) },
     '-',
     { icon: collapsed.has(p) ? 'expand' : 'collapse', label: collapsed.has(p) ? 'Développer' : 'Réduire', disabled: !hasKids, run: () => toggleFolder(p) },
     { icon: 'expand', label: 'Tout développer', run: expandAll },
@@ -468,6 +513,7 @@ function collapseAll() {
 }
 
 async function newFolder(parent) {
+  if (ro()) return;
   const name = await promptModal(parent ? `Nouveau sous-dossier dans « ${parent} »` : 'Nouveau dossier', 'Nom du dossier', '', 'Créer');
   if (!name?.trim()) return;
   const path = (parent ? parent + '/' : '') + name.trim();
@@ -476,6 +522,7 @@ async function newFolder(parent) {
 }
 
 async function renameFolder(p) {
+  if (ro()) return;
   const name = await promptModal('Renommer le dossier', 'Nouveau nom', leaf(p), 'Renommer');
   if (!name?.trim() || name.trim() === leaf(p)) return;
   const to = (parentOf(p) ? parentOf(p) + '/' : '') + name.trim();
@@ -483,12 +530,14 @@ async function renameFolder(p) {
 }
 
 async function moveFolder(from, to, msg) {
+  if (ro()) return;
   if (!await mutate('rename_folder', { from, to }, msg)) return;
   if (st.folder === from || st.folder.startsWith(from + '/')) st.folder = to + st.folder.slice(from.length);
   renderSidebar(); renderList();
 }
 
 async function deleteFolder(p) {
+  if (ro()) return;
   const n = vault.items.filter((i) => L.inFolder(i, p)).length;
   const subs = allFolderPaths().filter((x) => x.startsWith(p + '/')).length;
   const what = [subs && `${subs} sous-dossier${subs > 1 ? 's' : ''}`, n && `${n} élément${n > 1 ? 's' : ''} (déplacés dans « Aucun dossier », pas supprimés)`].filter(Boolean).join(' et ');
@@ -498,18 +547,20 @@ async function deleteFolder(p) {
 
 /* ---------- items ---------- */
 async function moveItem(it, folder) {
+  if (ro()) return;
   if (it.folder === folder) return;
   await mutate('move_items', { ids: [it.id], folder }, `Déplacé vers « ${folder || 'Aucun dossier'} »`);
 }
 
 async function moveDialog(it) {
+  if (ro()) return;
   const opts = ['', ...allFolderPaths()];
   const v = await selectModal('Déplacer vers', `Dossier de destination pour « ${it.name} »`, opts.map((p) => [p, p || 'Aucun dossier']), it.folder, 'Déplacer');
   if (v !== null) await moveItem(it, v);
 }
 
 async function deleteItem(it) {
-  if (!it) return;
+  if (!it || ro()) return;
   if (!await confirmModal('Supprimer l’élément', `Envoyer <b>${esc(it.name)}</b> à la corbeille ? Vous pourrez le restaurer depuis le coffre web.`, 'Supprimer')) return;
   if (await mutate('delete_item', { id: it.id }, 'Élément envoyé à la corbeille')) { st.selId = null; st.edit = null; renderList(); }
 }
@@ -692,6 +743,7 @@ function renderDetail() {
 
 /* ---------- editor ---------- */
 async function startNew(kind, folder = st.folder) {
+  if (ro()) return;
   if (!await leaveEdit()) return;
   st.edit = { id: null, kind, name: '', notes: '', folder, data: {} };
   st.dirty = false;
@@ -701,6 +753,7 @@ async function startNew(kind, folder = st.folder) {
 }
 
 async function startEdit() {
+  if (ro()) return;
   const it = cur();
   if (!it || st.edit) return;
   st.edit = { id: it.id, kind: it.kind, name: it.name, notes: it.notes, folder: it.folder, data: { ...it.data } };
@@ -817,6 +870,7 @@ function rerenderEditor() {
 }
 
 async function saveEdit() {
+  if (ro()) return;
   const e = st.edit;
   if (!e) return;
   const err = $('#ed-err');
@@ -968,6 +1022,7 @@ document.addEventListener('drop', async (e) => {
 /* ---------------- context menu ---------------- */
 function openMenu(x, y, entries) {
   const m = $('#menu');
+  if (st.offline) entries = entries.map((e) => e !== '-' && e.w ? { ...e, disabled: true } : e); // w: writes to the vault
   m.innerHTML = entries.map((e, i) => e === '-' ? '<div class="sep"></div>'
     : `<button role="menuitem" data-mi="${i}" class="${e.danger ? 'danger-item' : ''}" ${e.disabled ? 'disabled' : ''}>${e.html || ic(e.icon)}<span>${e.label}</span>${e.kbd ? `<kbd>${e.kbd}</kbd>` : ''}</button>`).join('');
   m.classList.remove('hidden');
@@ -1118,13 +1173,15 @@ function openSettings() {
     ['Sécurité', () => sel('account', 'timeout', "Délai d'expiration de la session")
       + sel('account', 'timeout_action', "Action à l'expiration")
       + chk('account', 'unlock_pin', 'Déverrouiller avec un code PIN')
-      + chk('account', 'unlock_system', "Déverrouiller avec l'authentification du système")],
+      + (snap.biometric ? chk('account', 'unlock_system', "Déverrouiller avec l'authentification du système", 'Touch ID, Windows Hello ou le mot de passe de la session. Le mot de passe maître est demandé après un redémarrage de Lightwarden.') : '')],
     ['Préférences', () => sel('account', 'clipboard_clear', 'Effacer le presse-papiers', 'Efface automatiquement les valeurs copiées de votre presse-papiers.')
       + chk('account', 'minimize_on_copy', 'Réduire lors de la copie dans le presse-papiers', "Réduit l'application lors de la copie des données d'un élément.")
       + chk('account', 'website_icons', 'Afficher les icônes des sites web', 'Les icônes sont récupérées depuis le service d’icônes de votre serveur.')],
     ["Paramètres de l'application (tous les comptes)", () => updatesSection()
       + chk('global', 'keep_background', 'Garder Lightwarden en cours d’exécution en arrière-plan', 'À la fermeture de la fenêtre, Lightwarden reste accessible depuis la zone de notification. Recommandé avec l’agent SSH.')
       + chk('global', 'autostart', 'Démarrer automatiquement à la connexion', 'Démarre Lightwarden à l’ouverture de session.')
+      + chk('global', 'start_hidden', 'Démarrer réduit', 'Au démarrage de la session, Lightwarden reste dans la zone de notification (ou le Dock) sans ouvrir la fenêtre. Nécessite le démarrage automatique.')
+      + chk('global', 'offline_cache', 'Mode hors ligne (cache local)', 'Si le serveur est injoignable, le coffre reste consultable depuis la copie locale, en lecture seule, et se resynchronise dès que le serveur revient.')
       + chk('global', 'hw_accel', "Utiliser l'accélération matérielle", 'Désactivez-la uniquement en cas de problèmes graphiques. Redémarrage requis.')
       + chk('global', 'ssh_agent', "Activer l'agent SSH", 'Signe les demandes SSH directement depuis votre coffre.')
       + sel('global', 'ssh_approval', "Demander une autorisation lors de l'utilisation de l'agent SSH", "Choisir comment gérer les demandes d'autorisation de l'agent SSH.")
@@ -1158,10 +1215,16 @@ function openSettings() {
       }
       return;
     }
+    if (el.dataset.k === 'unlock_system') {
+      try { await invoke('set_system', { enable: el.checked }); snap.account.unlock_system = el.checked; toast(el.checked ? 'Authentification du système activée' : 'Authentification du système désactivée'); }
+      catch (x) { el.checked = !el.checked; toast(String(x), true); }
+      return;
+    }
     snap[el.dataset.scope][el.dataset.k] = el.type === 'checkbox' ? el.checked : +el.value;
     try { await invoke('save_settings', { global: snap.global, account: snap.account }); }
     catch (x) { toast(String(x), true); }
     applyTheme();
+    if (el.dataset.k === 'offline_cache') await syncNet();
     renderList();
   };
 }

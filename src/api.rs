@@ -55,6 +55,11 @@ fn gs(v: &Value, k: &str) -> String { g(v, k).as_str().unwrap_or("").to_string()
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(30))).build().into()
 }
+/// Cheap reachability probe (the identity server's discovery document).
+pub fn reachable(srv: &Server) -> bool {
+    let a: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(6))).build().into();
+    a.get(&format!("{}/.well-known/openid-configuration", srv.identity)).call().is_ok_and(|r| !matches!(r.status().as_u16(), 502..=504))
+}
 fn net(e: ureq::Error) -> String { format!("Impossible de joindre le serveur ({e}).") }
 
 fn device_type() -> &'static str {
@@ -88,6 +93,7 @@ pub struct Session {
     folder_ids: HashMap<String, String>, // decrypted path -> folder id
     raw: Value, // last /sync response (encrypted): lets a PIN unlock work offline
     pub vault: Vault,
+    pub offline: bool, // the server was unreachable on the last call or probe
 }
 
 pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending: Option<(Pending, &str)>) -> Result<Session, LoginErr> {
@@ -157,7 +163,7 @@ pub fn login(srv: &Server, email: &str, password: &str, device_id: &str, pending
     let mut s = Session {
         srv: srv.clone(), access: gs(&tok, "access_token"), refresh: gs(&tok, "refresh_token"),
         key: Key::stretch(&mk), // replaced by the user key in sync()
-        ciphers: HashMap::new(), folder_ids: HashMap::new(), raw: Value::Null, vault: Vault::default(),
+        ciphers: HashMap::new(), folder_ids: HashMap::new(), raw: Value::Null, vault: Vault::default(), offline: false,
     };
     let v = s.call("GET", "/sync?excludeDomains=true", None)?;
     s.key = s.key.unwrap_user_key(&gs(g(&v, "profile"), "key"))?;
@@ -184,12 +190,14 @@ impl Session {
 
     /// API call; refreshes the access token once on 401.
     fn call(&mut self, m: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
-        let mut r = self.send(m, path, body).map_err(net)?;
+        let mut r = self.send(m, path, body).map_err(|e| self.down(e))?;
         if r.status().as_u16() == 401 && !self.refresh.is_empty() {
             self.refresh_token()?;
-            r = self.send(m, path, body).map_err(net)?;
+            r = self.send(m, path, body).map_err(|e| self.down(e))?;
         }
         let status = r.status().as_u16();
+        self.offline = matches!(status, 502..=504); // proxy up, server down
+        if self.offline { return Err("Impossible de joindre le serveur.".into()); }
         let v: Value = r.body_mut().read_json().unwrap_or(Value::Null);
         if !(200..300).contains(&status) {
             let msg = [gs(g(&v, "errorModel"), "message"), gs(&v, "message")].into_iter().find(|m| !m.is_empty()).unwrap_or_default();
@@ -198,10 +206,17 @@ impl Session {
         Ok(v)
     }
 
+    /// Transport failure: remembers that the server is unreachable.
+    fn down(&mut self, e: ureq::Error) -> String { self.offline = true; net(e) }
+
     fn refresh_token(&mut self) -> Result<(), String> {
         let mut r = agent().post(&format!("{}/connect/token", self.srv.identity))
             .send_form([("grant_type", "refresh_token"), ("client_id", "desktop"), ("refresh_token", self.refresh.as_str())])
-            .map_err(net)?;
+            .map_err(|e| self.down(e))?;
+        if matches!(r.status().as_u16(), 502..=504) {
+            self.offline = true;
+            return Err("Impossible de joindre le serveur.".into());
+        }
         if !r.status().is_success() {
             return Err("Session expirée : verrouillez puis reconnectez-vous.".into());
         }
@@ -210,6 +225,8 @@ impl Session {
         if !gs(&t, "refresh_token").is_empty() { self.refresh = gs(&t, "refresh_token"); }
         Ok(())
     }
+
+    pub fn srv(&self) -> Server { self.srv.clone() }
 
     pub fn sync(&mut self) -> Result<(), String> {
         let v = self.call("GET", "/sync?excludeDomains=true", None)?;
@@ -221,6 +238,20 @@ impl Session {
     pub fn decrypt(&self, s: &str) -> Result<String, String> { self.key.decrypt_string(s) }
     /// The user key, encrypted under `k` (used for PIN unlock).
     pub fn wrap_key(&self, k: &Key) -> String { k.wrap(&self.key) }
+
+    /// An empty locked session for a restart: `import` fills it once the user key is known.
+    pub fn shell(srv: Server) -> Session {
+        Session { srv, access: String::new(), refresh: String::new(), key: Key::default(), ciphers: HashMap::new(), folder_ids: HashMap::new(), raw: Value::Null, vault: Vault::default(), offline: false }
+    }
+    pub fn is_shell(&self) -> bool { self.raw.is_null() }
+    /// Refresh token + last sync, encrypted under the user key, for `import` after a restart.
+    pub fn export(&self) -> String { self.key.encrypt(json!({ "refresh": self.refresh, "raw": self.raw }).to_string().as_bytes()) }
+    pub fn import(&mut self, blob: &str, key: &Key) -> Result<(), String> {
+        let v: Value = serde_json::from_str(&key.decrypt_string(blob)?).map_err(|e| e.to_string())?;
+        self.refresh = gs(&v, "refresh");
+        self.raw = g(&v, "raw").clone();
+        Ok(())
+    }
 
     /// Drops every decrypted secret and the user key; the server tokens and encrypted data stay.
     pub fn seal(&mut self) {

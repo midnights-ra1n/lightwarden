@@ -23,7 +23,9 @@ impl Default for AccountSettings {
 pub struct GlobalSettings {
     pub keep_background: bool,
     pub autostart: bool,
+    pub start_hidden: bool, // when launched at login, stay in the tray / Dock instead of showing the window
     pub hw_accel: bool,
+    pub offline_cache: bool, // keep working from the local copy (read-only) while the server is down, re-sync when it is back
     pub ssh_agent: bool,
     pub ssh_approval: i32, // 0 always ask, 1 remember until lock, 2 never ask
     pub quick_copy: bool,
@@ -33,7 +35,7 @@ pub struct GlobalSettings {
 }
 impl Default for GlobalSettings {
     fn default() -> Self {
-        Self { keep_background: true, autostart: false, hw_accel: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, theme: 2, language: 0, auto_update: true }
+        Self { keep_background: true, autostart: false, start_hidden: false, hw_accel: true, offline_cache: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, theme: 2, language: 0, auto_update: true }
     }
 }
 
@@ -45,6 +47,14 @@ pub struct Account {
     pub settings: AccountSettings,
     #[serde(default)]
     pub pin: String, // the PIN, encrypted with the user key: re-arms PIN unlock after each master-password unlock
+    // Quick unlock across restarts: the user key wrapped under the PIN key / the keychain secret, and the
+    // session (refresh token + last sync) encrypted under the user key. Empty when no quick unlock is armed.
+    #[serde(default)]
+    pub pin_key: String,
+    #[serde(default)]
+    pub sys_key: String,
+    #[serde(default)]
+    pub blob: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
