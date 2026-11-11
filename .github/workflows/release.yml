@@ -75,6 +75,7 @@ jobs:
             target: universal-apple-darwin
             bundles: app,dmg
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60 # a stuck runner must fail, not hang for the 6 h default
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       LIGHTWARDEN_CHANNEL: ${{ needs.prepare.outputs.channel }}
@@ -91,9 +92,13 @@ jobs:
           node-version: 22
       - name: Linux build dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          # the runner's Azure apt mirror sometimes fails DNS: use the main archive, retry, short timeouts
+          sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          o="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+          sudo apt-get $o update
+          sudo apt-get $o install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Set version
         shell: bash
         run: |
@@ -137,7 +142,7 @@ jobs:
   cleanup:
     # a failed build must not leave a half-filled draft behind
     needs: [prepare, build, publish]
-    if: failure() && needs.prepare.outputs.release_id
+    if: (failure() || cancelled()) && needs.prepare.outputs.release_id
     runs-on: ubuntu-latest
     steps:
       - env:
