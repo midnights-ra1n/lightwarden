@@ -260,6 +260,12 @@ fn notify_ready(app: &AppHandle, version: &str) {
     std::thread::spawn(move || {
         #[cfg(not(windows))]
         {
+            // Without a bundle id, mac-notification-sys falls back to "use_default" and
+            // asks Launch Services for it, which pops the "Choose Application" dialog.
+            #[cfg(target_os = "macos")]
+            if let Err(e) = notify_rust::set_application(&app.config().identifier) {
+                eprintln!("notification: {e}");
+            }
             let mut n = notify_rust::Notification::new();
             n.appname("Lightwarden").summary(title).body(&body).icon("lightwarden")
                 .action("default", if french() { "Mettre à jour" } else { "Update" });

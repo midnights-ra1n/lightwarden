@@ -16,11 +16,18 @@
 - **Full item editing**, nested folders, drag and drop.
 - **SSH keys**: import (including encrypted ones), generation and a built-in **SSH agent**.
 - **PIN unlock**.
+- **Password and passphrase generator** (`Cmd/Ctrl+G`): length, character classes, ambiguous characters, EFF word list.
+- **Live TOTP codes** on login items, with a countdown and one-click copy (SHA-1/256/512, `otpauth://` URIs).
+- **Auto-lock** on inactivity (1 min to 1 hour), or as soon as the window is hidden or minimized; lock or log out.
+- **Clipboard clearing** after 10 s to 5 min; copied secrets are kept out of clipboard history managers.
+- **Global quick search** (`Cmd/Ctrl+Shift+Space`): brings Lightwarden up with the search focused, from any app.
 - **Tray icon**: lock every vault in one click, keep running in the background.
 - **macOS menu bar** with vault, account, view and help menus.
 - **Light / dark theme**.
 - **Languages**: English and French (follows the system language, or pick one in Settings).
 - **Signed automatic updates** (see below).
+
+See [ROADMAP.md](ROADMAP.md) for what is planned.
 
 ## Installation
 
@@ -152,6 +159,7 @@ Tests:
 cargo test
 node tests/logic.test.js
 node tests/i18n.test.js
+node tests/generator.test.js
 bash tests/next-version.test.sh
 bash tests/publish-newer.test.sh
 ```

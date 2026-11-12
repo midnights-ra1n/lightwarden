@@ -15,6 +15,8 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 hmac = "0.12"
 sha2 = "0.10"
+sha1 = "0.10"
+tauri-plugin-global-shortcut = "2"
 pbkdf2 = "0.12"
 argon2 = "0.5"
 hkdf = "0.12"

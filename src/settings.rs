@@ -29,13 +29,14 @@ pub struct GlobalSettings {
     pub ssh_agent: bool,
     pub ssh_approval: i32, // 0 always ask, 1 remember until lock, 2 never ask
     pub quick_copy: bool,
+    pub global_shortcut: bool, // system-wide hotkey that brings the vault up with the search focused
     pub theme: i32, // 0 system, 1 light, 2 dark
     pub language: i32,
     pub auto_update: bool, // download updates in the background and notify when ready
 }
 impl Default for GlobalSettings {
     fn default() -> Self {
-        Self { keep_background: true, autostart: false, start_hidden: false, hw_accel: true, offline_cache: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, theme: 2, language: 0, auto_update: true }
+        Self { keep_background: true, autostart: false, start_hidden: false, hw_accel: true, offline_cache: true, ssh_agent: false, ssh_approval: 1, quick_copy: true, global_shortcut: true, theme: 2, language: 0, auto_update: true }
     }
 }
 

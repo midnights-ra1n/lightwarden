@@ -373,6 +373,7 @@ function shellView() {
       <div class="side-foot">
         <button class="ghost" id="b-lock" title="Verrouiller (${MOD}+L)">${ic('lock')}Verrouiller</button>
         <button class="icon-btn" id="b-sync" title="Synchroniser (${MOD}+R)">${ic('refresh')}</button>
+        <button class="icon-btn" id="b-gen" title="Générateur de mots de passe (${MOD}+G)">${ic('sparkles')}</button>
         <button class="icon-btn" id="b-keys" title="Raccourcis clavier (F1)">${ic('keyboard')}</button>
         <button class="icon-btn" id="b-settings" title="Paramètres (${MOD}+,)">${ic('settings')}</button>
       </div>
@@ -396,6 +397,7 @@ function bindShell() {
   $('#b-sync').onclick = doSync;
   $('#b-settings').onclick = openSettings;
   $('#b-keys').onclick = openShortcuts;
+  $('#b-gen').onclick = () => openGenerator();
   $('#b-new').onclick = (e) => openNewMenu(e.currentTarget);
   $('#b-newfolder').onclick = (e) => { e.stopPropagation(); newFolder(''); };
   const q = $('#q');
@@ -697,11 +699,47 @@ function viewField(key, label, flags, value) {
   </div>`;
 }
 
+/* ---------- TOTP (live code of the selected login) ---------- */
+let totpTimer = null, totpState = null, totpGen = 0;
+function stopTotp() { clearInterval(totpTimer); totpTimer = null; totpState = null; totpGen++; }
+const totpBlock = () => `<div class="group"><div class="group-h">Code de vérification</div><div class="field">
+  <div class="fv"><label>Code à usage unique</label><div class="val mono totp" id="totp-code" translate="no">······</div></div>
+  <span class="totp-t" id="totp-t"></span><button class="icon-btn" data-act="copy-totp" title="Copier le code">${ic('copy')}</button></div></div>`;
+function startTotp(secret) {
+  stopTotp();
+  const gen = totpGen;
+  let busy = false;
+  const tick = async () => {
+    const c = $('#totp-code');
+    if (!c) return gen === totpGen && stopTotp();
+    if (!totpState || Date.now() >= totpState.until) {
+      if (busy) return;
+      busy = true;
+      try {
+        const r = await invoke('totp', { secret });
+        if (gen !== totpGen) return;
+        totpState = { code: r.code, until: Date.now() + r.remaining * 1000 };
+      } catch (e) {
+        if (gen === totpGen) { c.textContent = String(e); c.classList.add('err'); stopTotp(); }
+        return;
+      } finally { busy = false; }
+    }
+    const left = Math.max(0, Math.ceil((totpState.until - Date.now()) / 1000)), h = totpState.code.length / 2;
+    c.textContent = `${totpState.code.slice(0, h)} ${totpState.code.slice(h)}`;
+    const t = $('#totp-t');
+    t.textContent = left + ' s';
+    t.classList.toggle('low', left <= 5);
+  };
+  tick();
+  totpTimer = setInterval(tick, 1000);
+}
+
 function renderDetail() {
   const d = $('#detail');
   if (st.edit) return renderEditor();
   const it = cur();
   if (!it) {
+    stopTotp();
     d.innerHTML = `<div class="empty"><div class="logo">${SHIELD}</div><b>Aucun élément sélectionné</b>
       <span>Utilisez <kbd>${MOD} F</kbd> pour rechercher, <kbd>${MOD} N</kbd> pour créer, <kbd>F1</kbd> pour l’aide.</span></div>`;
     return;
@@ -714,6 +752,7 @@ function renderDetail() {
   const sshActions = it.kind === 5 && it.data.privateKey ? `<div class="btn-row">
       <button class="ghost" data-act="export-priv">${ic('download')}Exporter la clé privée</button>
       ${it.data.publicKey ? `<button class="ghost" data-act="export-pub">${ic('download')}Exporter la clé publique</button>` : ''}</div>` : '';
+  const totp = it.kind === 1 && it.data.totp;
   d.innerHTML = `<div class="d-wrap">
     <div class="d-head">${favicon(it, true)}<div class="grow"><h1 translate="no">${esc(it.name)}</h1>
       <div class="chips"><span class="chip">${ic(k.icon)}${k.one}</span>${it.folder ? `<span class="chip" translate="no">${ic('folder')}${esc(it.folder)}</span>` : ''}</div></div>
@@ -721,16 +760,18 @@ function renderDetail() {
         <button class="ghost" data-act="edit" title="Modifier (${MOD}+E)">${ic('pencil')}Modifier</button>
         <button class="icon-btn" data-act="delete" title="Supprimer (Suppr)">${ic('trash')}</button>
       </div></div>
-    ${groups}${sshActions}
+    ${groups}${totp ? totpBlock() : ''}${sshActions}
     ${it.notes ? `<div class="group"><div class="group-h">Notes</div><div class="notes" translate="no">${esc(it.notes)}</div></div>` : ''}
     ${!groups && !it.notes ? '<p class="muted">Cet élément est vide.</p>' : ''}
   </div>`;
+  totp ? startTotp(it.data.totp) : stopTotp(); // after the markup exists: the ticker looks for #totp-code
   d.onclick = (e) => {
     const b = e.target.closest('[data-act]');
     if (!b || st.edit) return;
     const key = b.dataset.k;
     switch (b.dataset.act) {
       case 'copy': return copyText(it.data[key], b.dataset.label);
+      case 'copy-totp': return copyText(totpState?.code, 'Code TOTP');
       case 'open': return openUri(it);
       case 'reveal': st.revealed.has(key) ? st.revealed.delete(key) : st.revealed.add(key); return renderDetail();
       case 'edit': return startEdit();
@@ -770,14 +811,57 @@ async function leaveEdit() {
   return true;
 }
 
-function genPassword(n = 20) {
-  const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*-_=+?';
-  const out = [];
-  const limit = 256 - (256 % cs.length); // rejection sampling: no modulo bias
-  while (out.length < n) {
-    for (const b of crypto.getRandomValues(new Uint8Array(n * 2))) if (b < limit && out.length < n) out.push(cs[b % cs.length]);
-  }
-  return out.join('');
+const GEN_DEF = { mode: 'chars', length: 20, upper: true, lower: true, digits: true, symbols: true, avoidAmbiguous: true, words: 5, separator: '-', capitalize: true, number: false };
+function genOpts() {
+  try { return { ...GEN_DEF, ...JSON.parse(localStorage.getItem('gen') || '{}') }; } catch { return { ...GEN_DEF }; }
+}
+
+/** Password / passphrase generator. With `onUse`, a button hands the result back (e.g. to the item editor). */
+function openGenerator(onUse) {
+  const o = genOpts();
+  let value = '';
+  const chk = (k, label) => `<label class="chk"><input type="checkbox" data-g="${k}" ${o[k] ? 'checked' : ''}><span class="box">${ic('check')}</span><span><span class="chk-l">${label}</span></span></label>`;
+  const num = (k, label, min, max) => `<label class="fld"><span class="fld-l">${label} : <b id="g-${k}-v">${o[k]}</b></span><input type="range" data-g="${k}" min="${min}" max="${max}" value="${o[k]}"></label>`;
+  const m = modal(`<div class="modal-h"><h2>Générateur de mots de passe</h2><button class="icon-btn" data-close title="Fermer (Échap)">${ic('x')}</button></div>
+    <div class="modal-b gen">
+      <div class="gen-out"><div class="gen-val mono" id="g-out" translate="no"></div>
+        <button class="icon-btn" id="g-new" title="Régénérer">${ic('refresh')}</button><button class="icon-btn" id="g-copy" title="Copier">${ic('copy')}</button></div>
+      <div class="gen-bits" id="g-bits"></div>
+      <label class="fld"><span class="fld-l">Type</span><div class="select"><select data-g="mode">
+        <option value="chars" ${o.mode === 'chars' ? 'selected' : ''}>Mot de passe</option><option value="words" ${o.mode === 'words' ? 'selected' : ''}>Phrase secrète</option></select>${ic('chevDown')}</div></label>
+      <div id="g-chars" class="gen-opts">${num('length', 'Longueur', 8, 64)}
+        ${chk('upper', 'Majuscules (A-Z)')}${chk('lower', 'Minuscules (a-z)')}${chk('digits', 'Chiffres (0-9)')}${chk('symbols', 'Symboles (!@#$…)')}
+        ${chk('avoidAmbiguous', 'Éviter les caractères ambigus (I, l, 1, O, 0)')}</div>
+      <div id="g-words" class="gen-opts">${num('words', 'Nombre de mots', 3, 10)}
+        <label class="fld"><span class="fld-l">Séparateur</span><input data-g="separator" maxlength="3" value="${esc(o.separator)}" autocomplete="off" spellcheck="false"></label>
+        ${chk('capitalize', 'Majuscule à chaque mot')}${chk('number', 'Ajouter un chiffre')}</div>
+    </div>
+    <div class="modal-f"><button class="ghost" data-close>Fermer</button>${onUse ? '<button class="primary" id="g-use">Utiliser ce mot de passe</button>' : ''}</div>`, 'sm');
+  const paint = () => {
+    const words = o.mode === 'words';
+    $('#g-chars', m).classList.toggle('hidden', words);
+    $('#g-words', m).classList.toggle('hidden', !words);
+    value = words ? G.passphrase(o) : G.password(o);
+    $('#g-out', m).innerHTML = colorPw(value);
+    const bits = G.entropy(o);
+    const [label, cls] = bits < 50 ? ['Faible', 'weak'] : bits < 80 ? ['Correct', 'mid'] : bits < 110 ? ['Fort', 'good'] : ['Excellent', 'good'];
+    $('#g-bits', m).className = 'gen-bits ' + cls;
+    $('#g-bits', m).innerHTML = `<span class="gen-bar"><i style="width:${Math.min(100, bits)}%"></i></span><span>${label} · ${bits} bits</span>`;
+    try { localStorage.setItem('gen', JSON.stringify(o)); } catch { /* private mode: options just are not remembered */ }
+  };
+  m.oninput = m.onchange = (e) => {
+    const el = e.target, k = el.dataset.g;
+    if (!k) return;
+    o[k] = el.type === 'checkbox' ? el.checked : el.type === 'range' ? +el.value : el.value;
+    if (el.type === 'range') $(`#g-${k}-v`, m).textContent = el.value;
+    if (el.type === 'checkbox' && !['upper', 'lower', 'digits', 'symbols'].some((c) => o[c]) && o.mode === 'chars' && k !== 'avoidAmbiguous') { o[k] = true; el.checked = true; } // keep one class
+    paint();
+  };
+  $('#g-new', m).onclick = paint;
+  $('#g-copy', m).onclick = () => copyText(value, 'Mot de passe');
+  if (onUse) $('#g-use', m).onclick = () => { closeModal(); onUse(value); };
+  paint();
+  ($('#g-use', m) || $('#g-copy', m)).focus();
 }
 
 function editField(key, label, flags) {
@@ -847,7 +931,7 @@ function renderEditor() {
     switch (b.dataset.act) {
       case 'cancel': return leaveEdit();
       case 'reveal': st.revealed.has(key) ? st.revealed.delete(key) : st.revealed.add(key); return rerenderEditor();
-      case 'gen': e.data[key] = genPassword(); st.revealed.add(key); st.dirty = true; return rerenderEditor();
+      case 'gen': return openGenerator((v) => { e.data[key] = v; st.revealed.add(key); st.dirty = true; rerenderEditor(); });
       case 'import': return importKeyFile();
       case 'sshgen': {
         if (e.data.privateKey && !await confirmModal('Remplacer la clé', 'Remplacer la clé actuelle par une nouvelle clé générée ?', 'Remplacer')) return;
@@ -1144,6 +1228,8 @@ function openShortcuts() {
     ['Filtrer par type', [MOD, '1…6']],
     ['Synchroniser', [MOD, 'R']],
     ['Verrouiller', [MOD, 'L']],
+    ['Générateur de mots de passe', [MOD, 'G']],
+    ['Recherche rapide (depuis n’importe quelle application)', [IS_MAC ? '⌘' : 'Ctrl', '⇧', 'Espace']],
     ['Paramètres', [MOD, ',']],
     ['Menu contextuel', ['⇧', 'F10']],
     ['Fermer / annuler / effacer la recherche', ['Échap']],
@@ -1170,7 +1256,7 @@ function openSettings() {
   const chk = (scope, key, label, hint = '') => `<label class="chk"><input type="checkbox" data-scope="${scope}" data-k="${key}" ${snap[scope][key] ? 'checked' : ''}>
     <span class="box">${ic('check')}</span><span><span class="chk-l">${label}</span>${hint ? `<span class="hint">${hint}</span>` : ''}</span></label>`;
   const tabs = [
-    ['Sécurité', () => sel('account', 'timeout', "Délai d'expiration de la session")
+    ['Sécurité', () => sel('account', 'timeout', "Délai d'expiration de la session", '« Immédiatement » verrouille dès que la fenêtre est masquée ou réduite.')
       + sel('account', 'timeout_action', "Action à l'expiration")
       + chk('account', 'unlock_pin', 'Déverrouiller avec un code PIN')
       + (snap.biometric ? chk('account', 'unlock_system', "Déverrouiller avec l'authentification du système", 'Touch ID, Windows Hello ou le mot de passe de la session. Le mot de passe maître est demandé après un redémarrage de Lightwarden.') : '')],
@@ -1186,6 +1272,7 @@ function openSettings() {
       + chk('global', 'ssh_agent', "Activer l'agent SSH", 'Signe les demandes SSH directement depuis votre coffre.')
       + sel('global', 'ssh_approval', "Demander une autorisation lors de l'utilisation de l'agent SSH", "Choisir comment gérer les demandes d'autorisation de l'agent SSH.")
       + sshHelp()
+      + chk('global', 'global_shortcut', 'Raccourci global de recherche rapide', 'Affiche Lightwarden avec la recherche active, depuis n’importe quelle application : ' + [IS_MAC ? '⌘' : 'Ctrl', '⇧', 'Espace'].map((k) => `<kbd>${k}</kbd>`).join(' '))
       + chk('global', 'quick_copy', 'Afficher les actions de copie rapide dans le coffre')
       + sel('global', 'theme', 'Thème', "Modifier la couleur du thème de l'application.")
       + sel('global', 'language', 'Langue', 'Un redémarrage est requis.')],
@@ -1366,6 +1453,7 @@ document.addEventListener('keydown', async (e) => {
   if (mod && k === 's') { e.preventDefault(); if (st.edit) saveEdit(); return; }
   if (mod && k === 'n') { e.preventDefault(); e.shiftKey ? newFolder(st.folder) : openNewMenu($('#b-new')); return; }
   if (mod && k === 'f') { e.preventDefault(); $('#q').focus(); $('#q').select(); return; }
+  if (mod && k === 'g') { e.preventDefault(); if (st.edit) return; openGenerator(); return; }
   if (mod && k === 'l') { e.preventDefault(); doLock(); return; }
   if (mod && k === 'r') { e.preventDefault(); doSync(); return; }
   if (mod && e.key === ',') { e.preventDefault(); openSettings(); return; }
@@ -1465,6 +1553,12 @@ listen('menu', async (e) => {
     case 'edit': return startEdit();
   }
 });
+
+// tell the backend the user is active (session timeout); throttled, the timeout granularity is a minute
+let lastAct = 0;
+for (const ev of ['keydown', 'mousedown', 'mousemove', 'wheel', 'touchstart']) {
+  addEventListener(ev, () => { const n = Date.now(); if (n - lastAct > 5000) { lastAct = n; invoke('activity').catch(() => {}); } }, { capture: true, passive: true });
+}
 
 listen('locked', () => { Object.assign(st, { selId: null, edit: null, dirty: false }); refresh(); });
 refresh().catch((e) => { document.body.textContent = 'Erreur : ' + e; });

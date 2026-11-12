@@ -123,6 +123,18 @@
     'À propos de Lightwarden': 'About Lightwarden', 'Gestionnaire de mots de passe compatible Bitwarden': 'Bitwarden-compatible password manager',
     'Code source sur GitHub': 'Source code on GitHub', 'Signaler un problème': 'Report an issue', 'Licence': 'License',
     'Client non officiel, indépendant de Bitwarden Inc.': 'Unofficial client, not affiliated with Bitwarden Inc.',
+    // generator, TOTP, auto-lock, quick search
+    'Générateur de mots de passe': 'Password generator', 'Générer': 'Generate', 'Régénérer': 'Regenerate', 'Type': 'Type', 'Phrase secrète': 'Passphrase',
+    'Longueur': 'Length', 'Majuscules (A-Z)': 'Uppercase (A-Z)', 'Minuscules (a-z)': 'Lowercase (a-z)', 'Chiffres (0-9)': 'Digits (0-9)', 'Symboles (!@#$…)': 'Symbols (!@#$…)',
+    'Éviter les caractères ambigus (I, l, 1, O, 0)': 'Avoid ambiguous characters (I, l, 1, O, 0)', 'Nombre de mots': 'Number of words', 'Séparateur': 'Separator',
+    'Majuscule à chaque mot': 'Capitalize each word', 'Ajouter un chiffre': 'Add a digit', 'Utiliser ce mot de passe': 'Use this password',
+    'Faible': 'Weak', 'Correct': 'Fair', 'Fort': 'Strong', 'Excellent': 'Excellent', 'Fermer (Échap)': 'Close (Esc)', 'Fermer': 'Close',
+    'Code de vérification': 'Verification code', 'Code à usage unique': 'One-time code', 'Copier le code': 'Copy code', 'Code TOTP': 'TOTP code',
+    'Clé TOTP invalide.': 'Invalid TOTP key.', "Steam Guard n'est pas pris en charge.": 'Steam Guard is not supported.',
+    '« Immédiatement » verrouille dès que la fenêtre est masquée ou réduite.': '“Immediately” locks as soon as the window is hidden or minimized.',
+    'Raccourci global de recherche rapide': 'Global quick-search shortcut', 'Espace': 'Space',
+    'Affiche Lightwarden avec la recherche active, depuis n\'importe quelle application :': 'Brings up Lightwarden with the search focused, from any application:',
+    'Recherche rapide (depuis n\'importe quelle application)': 'Quick search (from any application)',
     // Rust errors
     "URL non prise en charge": 'Unsupported URL', "Saisissez l'e-mail et le mot de passe maître.": 'Enter your email and master password.',
     "Saisissez l'URL du serveur.": 'Enter the server URL.', 'Prélogin refusé par le serveur (URL incorrecte ?).': 'Prelogin refused by the server (wrong URL?).',

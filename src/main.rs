@@ -4,6 +4,7 @@ mod biometric;
 mod crypto;
 mod settings;
 mod ssh;
+mod totp;
 mod updater;
 mod vault;
 
@@ -433,11 +434,10 @@ fn save_settings(global: GlobalSettings, account: AccountSettings, s: S, app: Ap
         (x.settings.unlock_pin, x.settings.unlock_system) = (pin, sys);
     }
     a.store.save();
-    if agent_changed {
-        drop(a);
-        agent::sync(&app);
-        a = s.lock().unwrap();
-    }
+    drop(a);
+    register_shortcut(&app);
+    if agent_changed { agent::sync(&app); }
+    let a = s.lock().unwrap();
     if autostart_changed {
         let al = app.autolaunch();
         if a.store.global.autostart { al.enable() } else { al.disable() }.map_err(|e| e.to_string())?;
@@ -459,7 +459,15 @@ fn copy(text: String, s: S, window: tauri::WebviewWindow) -> Result<(), String> 
     if g.is_none() {
         *g = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
     }
-    g.as_mut().unwrap().set_text(text.clone()).map_err(|e| e.to_string())?;
+    // keep secrets out of the clipboard history (Win+V, Maccy, Klipper…)
+    let set = g.as_mut().unwrap().set();
+    #[cfg(target_os = "macos")]
+    let set = arboard::SetExtApple::exclude_from_history(set);
+    #[cfg(windows)]
+    let set = arboard::SetExtWindows::exclude_from_cloud(arboard::SetExtWindows::exclude_from_history(set));
+    #[cfg(target_os = "linux")]
+    let set = arboard::SetExtLinux::exclude_from_history(set);
+    set.text(text.clone()).map_err(|e| e.to_string())?;
     if clear > 0 {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(clear));
@@ -470,6 +478,46 @@ fn copy(text: String, s: S, window: tauri::WebviewWindow) -> Result<(), String> 
     }
     if minimize { let _ = window.minimize(); }
     Ok(())
+}
+
+#[tauri::command]
+fn totp(secret: String) -> Result<totp::Code, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+    totp::code(&secret, now)
+}
+
+/// Seconds since start of the last user input in the window (reported by the UI).
+static LAST_INPUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn uptime() -> u64 { static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new(); T0.get_or_init(std::time::Instant::now).elapsed().as_secs() }
+
+#[tauri::command]
+fn activity() { LAST_INPUT.store(uptime(), std::sync::atomic::Ordering::Relaxed); }
+
+/// Session-timeout choices (see SEL.timeout in the UI): restart, immediately, 1 / 5 / 15 / 60 min, never.
+fn idle_limit(choice: i32) -> Option<u64> { [None, Some(0), Some(60), Some(300), Some(900), Some(3600), None].get(choice as usize).copied().flatten() }
+
+/// Enforces each account's session timeout. "Immediately" = as soon as the window is hidden or minimized.
+fn watch_idle(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let idle = uptime().saturating_sub(LAST_INPUT.load(std::sync::atomic::Ordering::Relaxed));
+        let away = app.get_webview_window("main").is_none_or(|w| !w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false));
+        let state = app.state::<Mutex<App>>();
+        let mut a = state.lock().unwrap();
+        let due: Vec<(String, bool)> = a.sessions.keys().filter_map(|e| {
+            let st = &a.store.accounts.iter().find(|x| &x.email == e)?.settings;
+            let hit = match idle_limit(st.timeout)? { 0 => away, n => idle >= n };
+            hit.then(|| (e.clone(), st.timeout_action == 1))
+        }).collect();
+        if due.is_empty() { continue; }
+        for (e, logout) in due {
+            if logout { a.forget_unlock(&e); } // log out: the master password is needed again
+            a.lock_account(&e);
+        }
+        drop(a);
+        agent::forget(&app);
+        let _ = app.emit("locked", ());
+    });
 }
 
 #[tauri::command]
@@ -677,6 +725,21 @@ fn on_menu_bar(app: &AppHandle, id: &str) {
     }
 }
 
+fn quick_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+    let main = if cfg!(target_os = "macos") { Modifiers::SUPER } else { Modifiers::CONTROL };
+    Shortcut::new(Some(main | Modifiers::SHIFT), Code::Space)
+}
+
+/// (Un)registers the global "quick search" hotkey according to the setting; another app may already own it.
+fn register_shortcut(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    let on = app.state::<Mutex<App>>().lock().unwrap().store.global.global_shortcut;
+    let r = if on { if gs.is_registered(quick_shortcut()) { Ok(()) } else { gs.register(quick_shortcut()) } } else { gs.unregister(quick_shortcut()) };
+    if let Err(e) = r { eprintln!("global shortcut: {e}"); }
+}
+
 const AUTOSTART_ARG: &str = "--autostart";
 
 pub fn show_main(app: &AppHandle) {
@@ -713,6 +776,12 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().with_denylist(&["update"])
             .with_state_flags(tauri_plugin_window_state::StateFlags::SIZE | tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::MAXIMIZED).build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().with_handler(|app, _, e| {
+            if e.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                show_main(app);
+                let _ = app.emit("menu", "search");
+            }
+        }).build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Mutex::new(updater::Updater::default()))
@@ -723,7 +792,7 @@ fn main() {
             sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
             ssh_parse, ssh_generate, open_text_file, save_text_file,
             update_info, update_check, update_install, french,
-            offline_state, set_pin, unlock_pin, set_system, unlock_system, ssh_agent_status, refresh_menu
+            offline_state, totp, activity, set_pin, unlock_pin, set_system, unlock_system, ssh_agent_status, refresh_menu
         ])
         .setup(move |app| {
             let menu = Menu::with_items(app, &[
@@ -766,6 +835,8 @@ fn main() {
             updater::start_background(app.handle().clone(), auto_update);
             agent::sync(app.handle());
             watch_servers(app.handle().clone());
+            watch_idle(app.handle().clone());
+            register_shortcut(app.handle());
             Ok(())
         })
         .on_menu_event(|app, e| on_menu_bar(app, e.id.as_ref()))
