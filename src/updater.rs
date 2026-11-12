@@ -196,7 +196,7 @@ pub fn begin_install(app: &AppHandle) {
         set(&app, Status::Installing { version: up.version.clone() });
         // let the window paint the "installing" state before the installer takes over
         tokio_sleep(Duration::from_millis(400)).await;
-        match up.install(&bytes) {
+        match install(&app, &up, &bytes) {
             Ok(()) => app.restart(), // Windows: the installer already exited the app
             Err(e) => {
                 app.state::<U>().lock().unwrap().bytes = Some(bytes);
@@ -204,6 +204,30 @@ pub fn begin_install(app: &AppHandle) {
             }
         }
     });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install(_: &AppHandle, up: &Update, bytes: &[u8]) -> Result<(), String> { up.install(bytes).map_err(|e| e.to_string()) }
+
+/// RPM: rpm >= 6 (Fedora 45+) refuses unsigned packages, so the plugin's `pkexec rpm -U` fails and it
+/// retries with a second (zenity + sudo) password prompt that fails too. The package is already verified
+/// by the updater's minisign signature, so only rpm's GPG check is skipped (digests are still checked).
+#[cfg(target_os = "linux")]
+fn install(app: &AppHandle, up: &Update, bytes: &[u8]) -> Result<(), String> {
+    let is_rpm = bytes.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) && std::env::var_os("APPIMAGE").is_none();
+    if !is_rpm { return up.install(bytes).map_err(|e| e.to_string()); }
+    // user-owned cache dir, not /tmp: no other local user can swap the file before root reads it
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let pkg = dir.join("update.rpm");
+    std::fs::write(&pkg, bytes).map_err(|e| e.to_string())?;
+    let res = std::process::Command::new("pkexec").args(["rpm", "-U", "--nosignature"]).arg(&pkg).status();
+    let _ = std::fs::remove_file(&pkg);
+    match res {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("pkexec rpm: {s}")),
+        Err(_) => up.install(bytes).map_err(|e| e.to_string()), // no pkexec: the plugin's sudo fallbacks
+    }
 }
 
 async fn tokio_sleep(d: Duration) {
