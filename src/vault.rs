@@ -16,6 +16,7 @@ pub struct Item {
 pub struct Vault {
     pub folders: Vec<String>,
     pub items: Vec<Item>,
+    pub trash: Vec<Item>, // soft-deleted items (Bitwarden "deletedDate" set)
 }
 
 /// An item as edited in the UI; `id` is None for a new item.

@@ -46,6 +46,8 @@ const ICONS = {
   trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+  refreshDot: '<path d="M3 2v6h6"/><path d="M21 12A9 9 0 0 0 6 5.3L3 8"/><path d="M21 22v-6h-6"/><path d="M3 12a9 9 0 0 0 15 6.7l3-2.7"/><circle cx="12" cy="12" r="1"/>',
+  undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
   sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
 };
@@ -59,6 +61,7 @@ const KINDS = [
   { k: 4, label: 'Identités', one: 'Identité', icon: 'user' },
   { k: 2, label: 'Notes sécurisées', one: 'Note sécurisée', icon: 'note' },
   { k: 5, label: 'Clés SSH', one: 'Clé SSH', icon: 'terminal' },
+  { k: -1, label: 'Corbeille', one: 'Élément supprimé', icon: 'trash' },
 ];
 const kindOf = (k) => KINDS.find((x) => x.k === k) || KINDS[1];
 
@@ -96,7 +99,9 @@ const st = {
 const collapsed = new Set(store.get('collapsed', []));
 
 const account = () => snap.accounts[snap.current];
-const cur = () => (vault && st.selId ? vault.items.find((i) => i.id === st.selId) : null) || null;
+const findItem = (id) => vault.items.find((i) => i.id === id) || vault.trash.find((i) => i.id === id);
+const inTrash = (it) => vault.trash.some((i) => i.id === it.id);
+const cur = () => (vault && st.selId ? findItem(st.selId) : null) || null;
 const leaf = (p) => p.split('/').pop();
 const parentOf = (p) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
 
@@ -373,7 +378,7 @@ function shellView() {
       <div class="side-foot">
         <button class="ghost" id="b-lock" title="Verrouiller (${MOD}+L)">${ic('lock')}Verrouiller</button>
         <button class="icon-btn" id="b-sync" title="Synchroniser (${MOD}+R)">${ic('refresh')}</button>
-        <button class="icon-btn" id="b-gen" title="Générateur de mots de passe (${MOD}+G)">${ic('sparkles')}</button>
+        <button class="icon-btn" id="b-gen" title="Générateur de mots de passe (${MOD}+G)">${ic('refreshDot')}</button>
         <button class="icon-btn" id="b-keys" title="Raccourcis clavier (F1)">${ic('keyboard')}</button>
         <button class="icon-btn" id="b-settings" title="Paramètres (${MOD}+,)">${ic('settings')}</button>
       </div>
@@ -384,7 +389,7 @@ function shellView() {
           <kbd id="q-kbd">${MOD} F</kbd><button class="icon-btn sm hidden" id="q-clear" title="Effacer (Échap)">${ic('x')}</button></div>
         <button class="primary new-btn" id="b-new" title="Nouvel élément (${MOD}+N)">${ic('plus')}</button>
       </div>
-      <div class="list-h"><b id="list-title"></b><span id="list-count"></span></div>
+      <div class="list-h"><b id="list-title"></b><span id="list-count"></span><button class="ghost sm hidden" id="b-empty">Vider la corbeille</button></div>
       <div class="items" id="items" tabindex="0" role="listbox"></div>
     </section>
     <main class="detail" id="detail"></main>
@@ -398,6 +403,7 @@ function bindShell() {
   $('#b-settings').onclick = openSettings;
   $('#b-keys').onclick = openShortcuts;
   $('#b-gen').onclick = () => openGenerator();
+  $('#b-empty').onclick = emptyTrash;
   $('#b-new').onclick = (e) => openNewMenu(e.currentTarget);
   $('#b-newfolder').onclick = (e) => { e.stopPropagation(); newFolder(''); };
   const q = $('#q');
@@ -439,7 +445,7 @@ function bindShell() {
     const qb = e.target.closest('[data-quick]');
     const row = e.target.closest('[data-id]');
     if (!row) return;
-    const it = vault.items.find((i) => i.id === row.dataset.id);
+    const it = findItem(row.dataset.id);
     if (qb) return qb.dataset.quick === 'u' ? copyField(it, 'username', "Nom d'utilisateur") : copyField(it, 'password', 'Mot de passe');
     select(row.dataset.id);
   };
@@ -459,7 +465,7 @@ function bindShell() {
 
 /* ---------- menus content ---------- */
 function newItemEntries(folder = st.folder) {
-  return KINDS.filter((k) => k.k).map((k) => ({ icon: k.icon, label: k.one, run: () => startNew(k.k, folder), w: true }));
+  return KINDS.filter((k) => k.k > 0).map((k) => ({ icon: k.icon, label: k.one, run: () => startNew(k.k, folder), w: true }));
 }
 function openNewMenu(anchor, x, y) {
   if (anchor) { const r = anchor.getBoundingClientRect(); x = r.left; y = r.bottom + 6; }
@@ -468,6 +474,8 @@ function openNewMenu(anchor, x, y) {
 
 function itemMenu(it) {
   const d = it.data;
+  if (inTrash(it)) return [{ icon: 'undo', label: 'Restaurer', run: () => restoreItem(it), w: true },
+    { icon: 'trash', label: 'Supprimer définitivement', danger: true, run: () => deleteItem(it), w: true }];
   const m = [];
   if (d.username) m.push({ icon: 'user', label: "Copier le nom d'utilisateur", kbd: `${MOD}+B`, run: () => copyField(it, 'username', "Nom d'utilisateur") });
   if (d.password) m.push({ icon: 'key', label: 'Copier le mot de passe', kbd: `${MOD}+C`, run: () => copyField(it, 'password', 'Mot de passe') });
@@ -561,10 +569,25 @@ async function moveDialog(it) {
   if (v !== null) await moveItem(it, v);
 }
 
+async function restoreItem(it) {
+  if (!it || ro()) return;
+  if (await mutate('restore_item', { id: it.id }, 'Élément restauré')) { st.selId = null; renderSidebar(); renderList(); }
+}
+
+async function emptyTrash() {
+  if (ro() || !await confirmModal('Vider la corbeille', `Supprimer définitivement les <b>${vault.trash.length}</b> éléments de la corbeille ? Cette action est irréversible.`, 'Vider')) return;
+  if (await mutate('purge_items', { id: null }, 'Corbeille vidée')) { st.selId = null; renderSidebar(); renderList(); }
+}
+
 async function deleteItem(it) {
   if (!it || ro()) return;
+  if (inTrash(it)) {
+    if (!await confirmModal('Supprimer définitivement', `Supprimer définitivement <b>${esc(it.name)}</b> ? Cette action est irréversible.`, 'Supprimer')) return;
+    if (await mutate('purge_items', { id: it.id }, 'Élément supprimé définitivement')) { st.selId = null; renderSidebar(); renderList(); }
+    return;
+  }
   if (!await confirmModal('Supprimer l’élément', `Envoyer <b>${esc(it.name)}</b> à la corbeille ? Vous pourrez le restaurer depuis le coffre web.`, 'Supprimer')) return;
-  if (await mutate('delete_item', { id: it.id }, 'Élément envoyé à la corbeille')) { st.selId = null; st.edit = null; renderList(); }
+  if (await mutate('delete_item', { id: it.id }, 'Élément envoyé à la corbeille')) { st.selId = null; st.edit = null; renderSidebar(); renderList(); }
 }
 
 async function doSync() {
@@ -590,7 +613,7 @@ function renderSidebar() {
   $('#acct').innerHTML = `<span class="av">${esc(acc.email[0]?.toUpperCase() || '?')}</span>
     <span class="who"><b>${esc(acc.email)}</b><span>${esc(serverLabel(acc))}</span></span>${ic('chevUpDown', 'sm')}`;
 
-  const counts = {};
+  const counts = { '-1': vault.trash.length };
   for (const it of vault.items) counts[it.kind] = (counts[it.kind] || 0) + 1;
   $('#kinds').innerHTML = KINDS.map((k) =>
     `<div class="row ${st.kind === k.k && (k.k !== 0 || !st.folder) ? 'sel' : ''}" data-kind="${k.k}" ${k.k === 0 ? 'data-drop=""' : ''}>${ic(k.icon)}<span class="label">${k.label}</span><span class="count">${(k.k ? counts[k.k] : vault.items.length) || ''}</span></div>`).join('');
@@ -638,9 +661,11 @@ function subline(it) {
 }
 
 function renderList() {
-  st.list = L.filterItems(vault.items, st);
+  const trash = st.kind === -1;
+  st.list = trash ? L.filterItems(vault.trash, { ...st, kind: 0, folder: '' }) : L.filterItems(vault.items, st);
+  $('#b-empty').classList.toggle('hidden', !trash || !vault.trash.length);
   if (!st.edit && st.selId && !st.list.some((i) => i.id === st.selId)) st.selId = null;
-  const title = st.query ? `Résultats pour « ${st.query} »` : st.folder ? leaf(st.folder) : kindOf(st.kind).label;
+  const title = st.query ? `Résultats pour « ${st.query} »` : st.folder && !trash ? leaf(st.folder) : kindOf(st.kind).label;
   $('#list-title').textContent = title;
   $('#list-count').textContent = `${st.list.length} élément${st.list.length > 1 ? 's' : ''}`;
   const quick = snap.global.quick_copy;
@@ -757,8 +782,9 @@ function renderDetail() {
     <div class="d-head">${favicon(it, true)}<div class="grow"><h1 translate="no">${esc(it.name)}</h1>
       <div class="chips"><span class="chip">${ic(k.icon)}${k.one}</span>${it.folder ? `<span class="chip" translate="no">${ic('folder')}${esc(it.folder)}</span>` : ''}</div></div>
       <div class="d-tools">
-        <button class="ghost" data-act="edit" title="Modifier (${MOD}+E)">${ic('pencil')}Modifier</button>
-        <button class="icon-btn" data-act="delete" title="Supprimer (Suppr)">${ic('trash')}</button>
+        ${inTrash(it) ? `<button class="ghost" data-act="restore">${ic('undo')}Restaurer</button>
+        <button class="icon-btn" data-act="delete" title="Supprimer définitivement">${ic('trash')}</button>` : `<button class="ghost" data-act="edit" title="Modifier (${MOD}+E)">${ic('pencil')}Modifier</button>
+        <button class="icon-btn" data-act="delete" title="Supprimer (Suppr)">${ic('trash')}</button>`}
       </div></div>
     ${groups}${totp ? totpBlock() : ''}${sshActions}
     ${it.notes ? `<div class="group"><div class="group-h">Notes</div><div class="notes" translate="no">${esc(it.notes)}</div></div>` : ''}
@@ -775,6 +801,7 @@ function renderDetail() {
       case 'open': return openUri(it);
       case 'reveal': st.revealed.has(key) ? st.revealed.delete(key) : st.revealed.add(key); return renderDetail();
       case 'edit': return startEdit();
+      case 'restore': return restoreItem(it);
       case 'delete': return deleteItem(it);
       case 'export-priv': return exportKey(it, true);
       case 'export-pub': return exportKey(it, false);
@@ -796,7 +823,7 @@ async function startNew(kind, folder = st.folder) {
 async function startEdit() {
   if (ro()) return;
   const it = cur();
-  if (!it || st.edit) return;
+  if (!it || st.edit || inTrash(it)) return;
   st.edit = { id: it.id, kind: it.kind, name: it.name, notes: it.notes, folder: it.folder, data: { ...it.data } };
   st.dirty = false;
   renderEditor();
@@ -1095,7 +1122,7 @@ document.addEventListener('drop', async (e) => {
   const id = e.dataTransfer.getData(MIME_ITEM);
   const from = e.dataTransfer.getData(MIME_FOLDER);
   if (id) {
-    const it = vault.items.find((i) => i.id === id);
+    const it = vault.items.find((i) => i.id === id); // trashed items cannot be moved
     if (it) await moveItem(it, to);
   } else if (from) {
     if (to === from || to.startsWith(from + '/') || parentOf(from) === to) return;

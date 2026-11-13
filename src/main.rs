@@ -193,6 +193,10 @@ async fn move_items(ids: Vec<String>, folder: String, s: S<'_>) -> Result<vault:
 async fn save_item(item: vault::ItemInput, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.save_item(&item)).await }
 #[tauri::command]
 async fn delete_item(id: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.delete_item(&id)).await }
+#[tauri::command]
+async fn restore_item(id: String, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.restore_item(&id)).await }
+#[tauri::command]
+async fn purge_items(id: Option<String>, s: S<'_>) -> Result<vault::Vault, String> { mutate(s, move |x| x.purge(id.as_deref())).await }
 
 fn auto_update(app: &AppHandle) -> bool {
     app.state::<Mutex<App>>().lock().unwrap().store.global.auto_update
@@ -789,7 +793,7 @@ fn main() {
         .manage(Mutex::new(agent::Agent::default()))
         .invoke_handler(tauri::generate_handler![
             snapshot, vault, select_account, lock, remove_account, save_settings, copy, open_url, login,
-            sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item,
+            sync_vault, create_folder, rename_folder, delete_folder, move_items, save_item, delete_item, restore_item, purge_items,
             ssh_parse, ssh_generate, open_text_file, save_text_file,
             update_info, update_check, update_install, french,
             offline_state, totp, activity, set_pin, unlock_pin, set_system, unlock_system, ssh_agent_status, refresh_menu

@@ -274,10 +274,11 @@ impl Session {
             .filter_map(|f| Some((k.decrypt_string(&gs(f, "name")).ok()?, gs(f, "id")))).collect();
         let names: HashMap<&str, &str> = self.folder_ids.iter().map(|(n, i)| (i.as_str(), n.as_str())).collect();
         self.ciphers.clear();
-        let mut items = vec![];
+        let (mut items, mut trash) = (vec![], vec![]);
         for c in g(v, "ciphers").as_array().into_iter().flatten() {
-            // shortcut: organization items need the org RSA key; skipped. Trashed items skipped.
-            if !g(c, "organizationId").is_null() || !g(c, "deletedDate").is_null() { continue; }
+            // shortcut: organization items need the org RSA key; skipped.
+            if !g(c, "organizationId").is_null() { continue; }
+            let trashed = !g(c, "deletedDate").is_null();
             let Ok(ck) = self.cipher_key(c) else { continue };
             let d = |v: &Value, f: &str| ck.decrypt_string(&gs(v, f)).unwrap_or_default();
             let kind = g(c, "type").as_i64().unwrap_or(1);
@@ -292,16 +293,17 @@ impl Session {
             }
             data.retain(|_, v| !v.is_empty());
             let id = gs(c, "id");
-            items.push(Item {
+            (if trashed { &mut trash } else { &mut items }).push(Item {
                 id: id.clone(), kind, name: d(c, "name"), notes: d(c, "notes"), data,
                 folder: names.get(gs(c, "folderId").as_str()).map(|s| s.to_string()).unwrap_or_default(),
             });
             self.ciphers.insert(id, c.clone());
         }
-        items.sort_by_key(|i| i.name.to_lowercase());
+        items.sort_by_key(|i: &Item| i.name.to_lowercase());
+        trash.sort_by_key(|i: &Item| i.name.to_lowercase());
         let mut folders: Vec<String> = self.folder_ids.keys().cloned().collect();
         folders.sort();
-        self.vault = Vault { folders, items };
+        self.vault = Vault { folders, items, trash };
     }
 
     fn cipher_key(&self, c: &Value) -> Result<Key, String> {
@@ -359,6 +361,17 @@ impl Session {
 
     pub fn delete_item(&mut self, id: &str) -> Result<(), String> {
         self.call("PUT", &format!("/ciphers/{id}/delete"), None).map(|_| ())
+    }
+
+    pub fn restore_item(&mut self, id: &str) -> Result<(), String> {
+        self.call("PUT", &format!("/ciphers/{id}/restore"), None).map(|_| ())
+    }
+
+    /// Permanently deletes one trashed item (`None`) or every trashed item.
+    pub fn purge(&mut self, id: Option<&str>) -> Result<(), String> {
+        let ids: Vec<String> = match id { Some(i) => vec![i.into()], None => self.vault.trash.iter().map(|i| i.id.clone()).collect() };
+        for i in ids { self.call("DELETE", &format!("/ciphers/{i}"), None)?; }
+        Ok(())
     }
 
     /// Creates or updates an item. Updates start from the raw cipher so fields this client
