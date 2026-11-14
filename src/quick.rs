@@ -67,6 +67,8 @@ mod native {
             let path = dir.join(name);
             if !path.exists() { continue; }
             let mut cmd = if name.ends_with(".py") { let mut c = Command::new("python3"); c.arg(&path); c } else { Command::new(&path) };
+            // Wayland never maps a parentless Qt::Popup: run the Qt panel on XWayland (also lets it sit at the click)
+            if name.ends_with("-qt") { cmd.env("QT_QPA_PLATFORM", "xcb;wayland"); }
             let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() else { continue };
             // a helper that cannot start (missing Qt, no PyGObject) dies at once: try the next one
             std::thread::sleep(std::time::Duration::from_millis(400));

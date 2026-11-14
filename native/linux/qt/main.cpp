@@ -21,6 +21,9 @@
 #include <QIcon>
 #include <QKeyEvent>
 #include <QPointer>
+#include <QElapsedTimer>
+#include <QPainter>
+#include <QTimer>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -31,7 +34,8 @@ using Reply = std::function<void(const QJsonObject &)>;
 
 class Panel : public QWidget {
 public:
-    Panel() : QWidget(nullptr, Qt::Popup | Qt::FramelessWindowHint) {
+    // not Qt::Popup: its grab misses clicks on Wayland windows (XWayland), so it never closed; hide on deactivation instead
+    Panel() : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint) {
         resize(360, 520);
         auto *root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
@@ -111,6 +115,14 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent *e) override { if (e->key() == Qt::Key_Escape) hide(); else QWidget::keyPressEvent(e); }
+    bool event(QEvent *e) override {
+        if (e->type() == QEvent::WindowDeactivate && isVisible()) {
+            // KWin hands focus back to the previous window right after we open: take it back once
+            if (shownAt.elapsed() < 600) QTimer::singleShot(50, this, [this] { raise(); activateWindow(); });
+            else { hide(); closedAt.start(); }
+        }
+        return QWidget::event(e);
+    }
 
 private:
     QStackedWidget *stack; QLineEdit *search, *secret; QLabel *error, *lkError, *email; QListWidget *list;
@@ -120,6 +132,7 @@ private:
     std::map<int, Reply> pending;
     QJsonArray items;
     QJsonObject st;
+    QElapsedTimer closedAt, shownAt;
     int nextId = 0, seq = 0;
     bool usePassword = false, fr = false;
 
@@ -127,6 +140,8 @@ private:
 
     void toggle(double x, double y) {
         if (isVisible()) { hide(); return; }
+        // a click on the tray icon first deactivates the panel: that click means "close", not "reopen"
+        if (closedAt.isValid() && closedAt.elapsed() < 400) return;
         QScreen *s = QGuiApplication::primaryScreen();
         if (x >= 0) {
             qreal dpr = devicePixelRatio();  // tray positions are physical pixels
@@ -141,6 +156,7 @@ private:
             move(g.right() - width() - 12, g.top() + 12);
         }
         reset();
+        shownAt.start();
         show();
         raise();
         activateWindow();
@@ -222,7 +238,7 @@ private:
         h->addLayout(text, 1);
         auto btn = [&](const char *theme, const QString &tip, const QString &field, const char *fallback) {
             auto *b = new QToolButton;
-            b->setIcon(QIcon::fromTheme(theme));
+            b->setIcon(theme ? QIcon::fromTheme(theme) : keyIcon());
             if (b->icon().isNull()) b->setText(fallback);
             b->setToolTip(tip);
             b->setAutoRaise(true);
@@ -230,11 +246,25 @@ private:
             h->addWidget(b);
         };
         btn("user-identity", t("Copier l'identifiant", "Copy username"), "user", "U");
-        btn("dialog-password", t("Copier le mot de passe", "Copy password"), "pass", "P");
+        btn(nullptr, t("Copier le mot de passe", "Copy password"), "pass", "P");
         if (it["totp"].toBool()) btn("chronometer", t("Copier le code TOTP", "Copy TOTP code"), "totp", "T");
         auto *li = new QListWidgetItem(list);
         li->setSizeHint(QSize(0, 44));
         list->setItemWidget(li, w);
+    }
+
+    // themes ship no monochrome key (Breeze's "password" icons are padlocks): draw one in the text colour
+    QIcon keyIcon() const {
+        QPixmap px(16 * devicePixelRatio(), 16 * devicePixelRatio());
+        px.setDevicePixelRatio(devicePixelRatio());
+        px.fill(Qt::transparent);
+        QPainter p(&px);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(palette().color(QPalette::ButtonText), 1.6, Qt::SolidLine, Qt::RoundCap));
+        p.drawEllipse(QPointF(4.5, 8), 3, 3);                                           // bow
+        p.drawLine(QPointF(7.5, 8), QPointF(15, 8));                                    // shaft
+        p.drawLine(QPointF(12, 8), QPointF(12, 11)); p.drawLine(QPointF(14.5, 8), QPointF(14.5, 10.5));  // teeth
+        return QIcon(px);
     }
 
     void loadIcon(const QString &url, QLabel *label) {

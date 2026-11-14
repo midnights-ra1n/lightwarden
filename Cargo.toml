@@ -42,7 +42,7 @@ tauri-build = { version = "2", features = [] }
 lto = true
 strip = true
 
-[target."cfg(windows)".dependencies]
+[target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.8.1"
 
 [target."cfg(not(windows))".dependencies]
@@ -54,6 +54,9 @@ objc2-foundation = "0.3"
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
 block2 = "0.6"
 keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"

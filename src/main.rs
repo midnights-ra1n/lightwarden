@@ -14,10 +14,12 @@ use settings::{Account, AccountSettings, GlobalSettings, Store};
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use tauri::{
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
+#[cfg(target_os = "macos")]
+use tauri::menu::{CheckMenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
+#[cfg(not(target_os = "linux"))]
+use tauri::{menu::{Menu, MenuItem}, tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
@@ -760,6 +762,59 @@ fn tray_click(app: &AppHandle, pos: Option<(f64, f64)>) {
     if !quick::toggle(app, pos) { show_main(app); }
 }
 
+fn on_tray_menu(app: &AppHandle, id: &str) {
+    match id {
+        "open" => show_main(app),
+        "lock" => {
+            lock_all(app);
+            let _ = app.emit("locked", ());
+        }
+        "update" => update_from_menu(app),
+        "quit" => app.exit(0),
+        _ => {}
+    }
+}
+
+/// StatusNotifierItem tray (KDE, GNOME with the AppIndicator extension…): unlike libappindicator it gets `Activate` on left click.
+#[cfg(target_os = "linux")]
+mod linux_tray {
+    use super::{on_tray_menu, show_main, tray_click, tx, AppHandle};
+    use ksni::{blocking::TrayMethods, menu::StandardItem, Icon, MenuItem, ToolTip};
+
+    pub struct Tray { app: AppHandle, icon: Icon }
+
+    impl ksni::Tray for Tray {
+        fn id(&self) -> String { "lightwarden".into() }
+        fn title(&self) -> String { "Lightwarden".into() }
+        fn icon_pixmap(&self) -> Vec<Icon> { vec![self.icon.clone()] }
+        fn tool_tip(&self) -> ToolTip { ToolTip { title: "Lightwarden".into(), ..Default::default() } }
+        // (0, 0) when the host does not know where the icon is
+        fn activate(&mut self, x: i32, y: i32) { tray_click(&self.app, (x > 0 || y > 0).then_some((x as f64, y as f64))) }
+        fn secondary_activate(&mut self, _: i32, _: i32) { show_main(&self.app) }
+        fn menu(&self) -> Vec<MenuItem<Self>> {
+            let item = |id: &'static str, fr: &'static str, en: &'static str| StandardItem {
+                label: tx(fr, en).into(),
+                activate: Box::new(move |t: &mut Self| on_tray_menu(&t.app, id)),
+                ..Default::default()
+            }.into();
+            vec![
+                item("open", "Ouvrir Lightwarden", "Open Lightwarden"),
+                item("lock", "Verrouiller tous les coffres", "Lock all vaults"),
+                item("update", "Rechercher des mises à jour", "Check for updates"),
+                MenuItem::Separator,
+                item("quit", "Quitter", "Quit"),
+            ]
+        }
+    }
+
+    pub fn spawn(app: &AppHandle, img: tauri::image::Image<'_>) -> Result<ksni::blocking::Handle<Tray>, Box<dyn std::error::Error>> {
+        let mut data = img.rgba().to_vec();
+        for px in data.chunks_exact_mut(4) { px.rotate_right(1) } // RGBA -> ARGB32 (network byte order)
+        let icon = Icon { width: img.width() as i32, height: img.height() as i32, data };
+        Ok(Tray { app: app.clone(), icon }.spawn()?)
+    }
+}
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -813,35 +868,25 @@ fn main() {
             offline_state, totp, activity, set_pin, unlock_pin, set_system, unlock_system, ssh_agent_status, refresh_menu
         ])
         .setup(move |app| {
-            let menu = Menu::with_items(app, &[
-                &MenuItem::with_id(app, "open", tx("Ouvrir Lightwarden", "Open Lightwarden"), true, None::<&str>)?,
-                &MenuItem::with_id(app, "lock", tx("Verrouiller tous les coffres", "Lock all vaults"), true, None::<&str>)?,
-                &MenuItem::with_id(app, "update", tx("Rechercher des mises à jour", "Check for updates"), true, None::<&str>)?,
-                &MenuItem::with_id(app, "quit", tx("Quitter", "Quit"), true, None::<&str>)?,
-            ])?;
-            // Linux tray icons only open their menu (no click events), so the quick panel gets an entry there
-            #[cfg(target_os = "linux")]
-            menu.insert(&MenuItem::with_id(app, "quick", tx("Recherche rapide", "Quick search"), true, None::<&str>)?, 0)?;
             // macOS: template icon, the menu bar recolours it (white on dark, black on light).
             // shortcut: elsewhere the colour follows the app theme, not the panel; applied at startup.
             let png: &[u8] = if light_tray || cfg!(target_os = "macos") { include_bytes!("../assets/tray-black.png") } else { include_bytes!("../assets/tray-white.png") };
+            // Linux: libappindicator (Tauri's tray) never reports clicks, so a left click could only open the menu
+            #[cfg(target_os = "linux")]
+            app.manage(linux_tray::spawn(app.handle(), Image::from_bytes(png)?)?);
+            #[cfg(not(target_os = "linux"))]
             TrayIconBuilder::with_id("main")
                 .icon(Image::from_bytes(png)?)
                 .icon_as_template(true)
                 .tooltip("Lightwarden")
-                .menu(&menu)
+                .menu(&Menu::with_items(app, &[
+                    &MenuItem::with_id(app, "open", tx("Ouvrir Lightwarden", "Open Lightwarden"), true, None::<&str>)?,
+                    &MenuItem::with_id(app, "lock", tx("Verrouiller tous les coffres", "Lock all vaults"), true, None::<&str>)?,
+                    &MenuItem::with_id(app, "update", tx("Rechercher des mises à jour", "Check for updates"), true, None::<&str>)?,
+                    &MenuItem::with_id(app, "quit", tx("Quitter", "Quit"), true, None::<&str>)?,
+                ])?)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, e| match e.id.as_ref() {
-                    "open" => show_main(app),
-                    "quick" => tray_click(app, None),
-                    "lock" => {
-                        lock_all(app);
-                        let _ = app.emit("locked", ());
-                    }
-                    "update" => update_from_menu(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
+                .on_menu_event(|app, e| on_tray_menu(app, e.id.as_ref()))
                 .on_tray_icon_event(|tray, e| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = e {
                         tray_click(tray.app_handle(), Some((position.x, position.y)));
