@@ -724,6 +724,15 @@ function viewField(key, label, flags, value) {
   </div>`;
 }
 
+/* ---------- password history ---------- */
+const fmtDate = (iso) => { const t = new Date(iso); return isNaN(t) ? '' : t.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); };
+const historyBlock = (it) => !it.history?.length ? '' : `<div class="group"><div class="group-h">Historique des mots de passe</div>${it.history.map((h, i) => {
+  const key = `h${i}`, shown = st.revealed.has(key);
+  return `<div class="field"><div class="fv"><label translate="no">${esc(fmtDate(h.date))}</label><div translate="no" class="val">${shown ? colorPw(h.password) : '••••••••••••'}</div></div>
+    <button class="icon-btn" data-act="reveal" data-k="${key}" title="${shown ? 'Masquer' : 'Afficher'}">${ic(shown ? 'eyeOff' : 'eye')}</button>
+    <button class="icon-btn" data-act="copy-hist" data-k="${i}" title="Copier">${ic('copy')}</button></div>`;
+}).join('')}</div>`;
+
 /* ---------- TOTP (live code of the selected login) ---------- */
 let totpTimer = null, totpState = null, totpGen = 0;
 function stopTotp() { clearInterval(totpTimer); totpTimer = null; totpState = null; totpGen++; }
@@ -786,7 +795,7 @@ function renderDetail() {
         <button class="icon-btn" data-act="delete" title="Supprimer définitivement">${ic('trash')}</button>` : `<button class="ghost" data-act="edit" title="Modifier (${MOD}+E)">${ic('pencil')}Modifier</button>
         <button class="icon-btn" data-act="delete" title="Supprimer (Suppr)">${ic('trash')}</button>`}
       </div></div>
-    ${groups}${totp ? totpBlock() : ''}${sshActions}
+    ${groups}${historyBlock(it)}${totp ? totpBlock() : ''}${sshActions}
     ${it.notes ? `<div class="group"><div class="group-h">Notes</div><div class="notes" translate="no">${esc(it.notes)}</div></div>` : ''}
     ${!groups && !it.notes ? '<p class="muted">Cet élément est vide.</p>' : ''}
   </div>`;
@@ -798,6 +807,7 @@ function renderDetail() {
     switch (b.dataset.act) {
       case 'copy': return copyText(it.data[key], b.dataset.label);
       case 'copy-totp': return copyText(totpState?.code, 'Code TOTP');
+      case 'copy-hist': return copyText(it.history[key]?.password, 'Ancien mot de passe');
       case 'open': return openUri(it);
       case 'reveal': st.revealed.has(key) ? st.revealed.delete(key) : st.revealed.add(key); return renderDetail();
       case 'edit': return startEdit();
@@ -1588,4 +1598,5 @@ for (const ev of ['keydown', 'mousedown', 'mousemove', 'wheel', 'touchstart']) {
 }
 
 listen('locked', () => { Object.assign(st, { selId: null, edit: null, dirty: false }); refresh(); });
+listen('unlocked', () => refresh()); // unlocked from the menu bar panel
 refresh().catch((e) => { document.body.textContent = 'Erreur : ' + e; });

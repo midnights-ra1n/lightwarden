@@ -1,1 +1,5 @@
 /target
+/native/windows/bin
+/native/windows/obj
+/native/windows/publish
+/native/linux/qt/build

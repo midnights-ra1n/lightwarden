@@ -134,6 +134,7 @@
     'Éviter les caractères ambigus (I, l, 1, O, 0)': 'Avoid ambiguous characters (I, l, 1, O, 0)', 'Nombre de mots': 'Number of words', 'Séparateur': 'Separator',
     'Majuscule à chaque mot': 'Capitalize each word', 'Ajouter un chiffre': 'Add a digit', 'Utiliser ce mot de passe': 'Use this password',
     'Faible': 'Weak', 'Correct': 'Fair', 'Fort': 'Strong', 'Excellent': 'Excellent', 'Fermer (Échap)': 'Close (Esc)', 'Fermer': 'Close',
+    'Historique des mots de passe': 'Password history', 'Ancien mot de passe': 'Old password',
     'Code de vérification': 'Verification code', 'Code à usage unique': 'One-time code', 'Copier le code': 'Copy code', 'Code TOTP': 'TOTP code',
     'Clé TOTP invalide.': 'Invalid TOTP key.', "Steam Guard n'est pas pris en charge.": 'Steam Guard is not supported.',
     '« Immédiatement » verrouille dès que la fenêtre est masquée ou réduite.': '“Immediately” locks as soon as the window is hidden or minimized.',

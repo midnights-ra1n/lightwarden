@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod biometric;
 mod crypto;
+mod quick;
 mod settings;
 mod ssh;
 mod totp;
@@ -380,7 +381,10 @@ async fn set_system(enable: bool, s: S<'_>, window: tauri::WebviewWindow) -> Res
 }
 
 #[tauri::command]
-async fn unlock_system(s: S<'_>, window: tauri::WebviewWindow) -> Result<(), String> {
+async fn unlock_system(s: S<'_>, window: tauri::WebviewWindow) -> Result<(), String> { unlock_system_at(s, hwnd(&window)).await }
+
+/// `h`: window handle the Windows Hello dialog attaches to (0 elsewhere).
+async fn unlock_system_at(s: S<'_>, h: isize) -> Result<(), String> {
     const NEED_MP: &str = "Saisissez votre mot de passe maître.";
     let (email, sess, wrapped) = {
         let a = s.lock().unwrap();
@@ -389,7 +393,7 @@ async fn unlock_system(s: S<'_>, window: tauri::WebviewWindow) -> Result<(), Str
         let w = a.sys_keys.get(&e).cloned().ok_or(NEED_MP)?;
         (e, sess, w)
     };
-    let (e2, h) = (email.clone(), hwnd(&window));
+    let e2 = email.clone();
     let key = tauri::async_runtime::spawn_blocking(move || {
         biometric::verify(tx("Déverrouiller Lightwarden", "Unlock Lightwarden"), h)?;
         crypto::Key::stretch(&biometric::secret(&e2)?).unwrap_user_key(&wrapped)
@@ -454,6 +458,12 @@ static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
 #[tauri::command]
 fn copy(text: String, s: S, window: tauri::WebviewWindow) -> Result<(), String> {
+    if copy_text(&s, text)? { let _ = window.minimize(); }
+    Ok(())
+}
+
+/// Puts `text` on the clipboard (cleared later per the account setting); returns whether the window should minimize.
+fn copy_text(s: &Mutex<App>, text: String) -> Result<bool, String> {
     let (clear, minimize) = {
         let a = s.lock().unwrap();
         let acc = a.store.accounts.get(a.store.current).map(|x| x.settings.clone()).unwrap_or_default();
@@ -480,8 +490,7 @@ fn copy(text: String, s: S, window: tauri::WebviewWindow) -> Result<(), String> 
             }
         });
     }
-    if minimize { let _ = window.minimize(); }
-    Ok(())
+    Ok(minimize)
 }
 
 #[tauri::command]
@@ -746,6 +755,11 @@ fn register_shortcut(app: &AppHandle) {
 
 const AUTOSTART_ARG: &str = "--autostart";
 
+/// Left click on the tray icon (`pos`: physical pixels, None when unknown): the native quick panel, else the main window.
+fn tray_click(app: &AppHandle, pos: Option<(f64, f64)>) {
+    if !quick::toggle(app, pos) { show_main(app); }
+}
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -805,6 +819,9 @@ fn main() {
                 &MenuItem::with_id(app, "update", tx("Rechercher des mises à jour", "Check for updates"), true, None::<&str>)?,
                 &MenuItem::with_id(app, "quit", tx("Quitter", "Quit"), true, None::<&str>)?,
             ])?;
+            // Linux tray icons only open their menu (no click events), so the quick panel gets an entry there
+            #[cfg(target_os = "linux")]
+            menu.insert(&MenuItem::with_id(app, "quick", tx("Recherche rapide", "Quick search"), true, None::<&str>)?, 0)?;
             // macOS: template icon, the menu bar recolours it (white on dark, black on light).
             // shortcut: elsewhere the colour follows the app theme, not the panel; applied at startup.
             let png: &[u8] = if light_tray || cfg!(target_os = "macos") { include_bytes!("../assets/tray-black.png") } else { include_bytes!("../assets/tray-white.png") };
@@ -816,6 +833,7 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
                     "open" => show_main(app),
+                    "quick" => tray_click(app, None),
                     "lock" => {
                         lock_all(app);
                         let _ = app.emit("locked", ());
@@ -825,8 +843,8 @@ fn main() {
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, e| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-                        show_main(tray.app_handle());
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = e {
+                        tray_click(tray.app_handle(), Some((position.x, position.y)));
                     }
                 })
                 .build(app)?;
@@ -836,6 +854,7 @@ fn main() {
             if !(start_hidden && std::env::args().any(|a| a == AUTOSTART_ARG)) { show_main(app.handle()); }
             // entries written before this argument existed lack it
             if autostart { let _ = app.autolaunch().enable(); }
+            quick::init(app.handle());
             updater::start_background(app.handle().clone(), auto_update);
             agent::sync(app.handle());
             watch_servers(app.handle().clone());

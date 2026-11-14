@@ -2610,7 +2610,6 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "cbc",
- "core-foundation 0.9.4",
  "directories",
  "getrandom 0.3.4",
  "hkdf",

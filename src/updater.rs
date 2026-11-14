@@ -197,7 +197,7 @@ pub fn begin_install(app: &AppHandle) {
         // let the window paint the "installing" state before the installer takes over
         tokio_sleep(Duration::from_millis(400)).await;
         match install(&app, &up, &bytes) {
-            Ok(()) => app.restart(), // Windows: the installer already exited the app
+            Ok(()) => relaunch(&app), // Windows: the installer already exited the app
             Err(e) => {
                 app.state::<U>().lock().unwrap().bytes = Some(bytes);
                 set(&app, Status::Error { message: format!("{} ({e})", if french() { "Échec de l'installation" } else { "Installation failed" }) });
@@ -205,6 +205,22 @@ pub fn begin_install(app: &AppHandle) {
         }
     });
 }
+
+/// macOS: `app.restart()` starts the new process while the old one is still alive, which leaves a ghost
+/// Dock icon. Exit first, then let a detached shell reopen the (replaced) bundle once we are gone.
+#[cfg(target_os = "macos")]
+fn relaunch(app: &AppHandle) {
+    let bundle = std::env::current_exe().ok().and_then(|p| p.ancestors().nth(3).map(|b| b.to_path_buf()));
+    match bundle {
+        Some(b) if b.extension().is_some_and(|e| e == "app") => {
+            let _ = std::process::Command::new("sh").arg("-c").arg("sleep 1; open \"$0\"").arg(b).spawn();
+            app.exit(0);
+        }
+        _ => app.restart(), // not run from a bundle (dev build)
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn relaunch(app: &AppHandle) { app.restart() }
 
 #[cfg(not(target_os = "linux"))]
 fn install(_: &AppHandle, up: &Update, bytes: &[u8]) -> Result<(), String> { up.install(bytes).map_err(|e| e.to_string()) }
