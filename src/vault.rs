@@ -2,6 +2,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// A previous password of a login (Bitwarden `passwordHistory`), newest first.
+#[derive(Clone, Serialize)]
+pub struct Hist {
+    pub password: String,
+    pub date: String, // ISO 8601, when it was replaced
+}
+
 #[derive(Clone, Serialize)]
 pub struct Item {
     pub id: String,
@@ -10,6 +17,7 @@ pub struct Item {
     pub notes: String,
     pub folder: String, // full path ("A/B"), "" = no folder
     pub data: BTreeMap<String, String>, // type-specific fields, Bitwarden names (username, number, privateKey…)
+    pub history: Vec<Hist>,
 }
 
 #[derive(Clone, Serialize, Default)]

@@ -63,35 +63,29 @@ mod sys {
 
 pub use sys::{available, verify};
 
-/// macOS: the app is ad-hoc signed, so its code hash changes on every update and a default keychain ACL
-/// (creator app only) re-prompts for the login keychain password. Store the item with an "any application"
-/// ACL instead; unlocking is still gated by the Touch ID prompt in `verify`.
-/// shortcut: other same-user processes can read the item; sign with a stable Developer ID and drop this.
+/// macOS: the app is ad-hoc signed, so its code hash changes on every update and the keychain item's
+/// "creator app only" ACL (plus its cdhash partition) re-prompts for the login keychain password; it cannot be
+/// loosened without that same prompt. The secret therefore lives in an item created and read by Apple's `security`
+/// tool, whose identity never changes: no prompt, ever. Unlocking is still gated by the Touch ID prompt in `verify`.
+/// shortcut: any same-user process can run `security` and read it; sign with a stable Developer ID and use a normal item.
 #[cfg(target_os = "macos")]
-fn store_open(email: &str, secret: &[u8]) -> Result<(), String> {
-    use core_foundation::{base::{CFRelease, CFTypeRef, TCFType}, data::CFData, dictionary::CFMutableDictionary, string::CFString};
-    use std::ffi::c_void;
-    extern "C" {
-        static kSecClass: CFTypeRef; static kSecClassGenericPassword: CFTypeRef; static kSecAttrService: CFTypeRef;
-        static kSecAttrAccount: CFTypeRef; static kSecValueData: CFTypeRef; static kSecAttrAccess: CFTypeRef;
-        fn SecAccessCreate(descriptor: CFTypeRef, trusted: CFTypeRef, out: *mut CFTypeRef) -> i32;
-        fn SecItemAdd(attrs: CFTypeRef, result: *mut CFTypeRef) -> i32;
+mod cli {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use std::process::Command;
+    const SVC: &str = "app.lightwarden.unlock.v2"; // the v1 items (keyring) carry the per-build ACL
+
+    fn run(args: &[&str]) -> Result<String, String> {
+        let o = Command::new("/usr/bin/security").args(args).output().map_err(|e| e.to_string())?;
+        if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()) }
+        else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
     }
-    unsafe {
-        let mut access: CFTypeRef = std::ptr::null();
-        // NULL trusted list = any application may use the item without prompting.
-        let st = SecAccessCreate(CFString::new("Lightwarden").as_concrete_TypeRef() as _, std::ptr::null(), &mut access);
-        if st != 0 { return Err(format!("Keychain (SecAccessCreate {st})")); }
-        let (svc, acct, data) = (CFString::new("app.lightwarden.unlock"), CFString::new(email), CFData::from_buffer(secret));
-        entry(email)?.delete_credential().ok(); // may prompt once when migrating an old item
-        let mut d = CFMutableDictionary::<*const c_void, *const c_void>::new();
-        for (k, v) in [(kSecClass, kSecClassGenericPassword), (kSecAttrService, svc.as_CFTypeRef()), (kSecAttrAccount, acct.as_CFTypeRef()),
-                       (kSecValueData, data.as_CFTypeRef()), (kSecAttrAccess, access)] { d.add(&k, &v); }
-        let st = SecItemAdd(d.as_concrete_TypeRef() as _, std::ptr::null_mut());
-        CFRelease(access);
-        if st != 0 { let _ = entry(email)?.set_secret(secret); return Err(format!("Keychain (SecItemAdd {st})")); } // never lose the secret
+    pub fn set(email: &str, secret: &[u8]) -> Result<(), String> {
+        run(&["add-generic-password", "-U", "-a", email, "-s", SVC, "-w", &B64.encode(secret)]).map(|_| ()).map_err(|e| format!("Keychain: {e}"))
     }
-    Ok(())
+    pub fn get(email: &str) -> Option<[u8; 32]> {
+        B64.decode(run(&["find-generic-password", "-a", email, "-s", SVC, "-w"]).ok()?).ok()?.try_into().ok()
+    }
+    pub fn delete(email: &str) { let _ = run(&["delete-generic-password", "-a", email, "-s", SVC]); }
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -106,7 +100,7 @@ pub fn new_secret(email: &str) -> Result<[u8; 32], String> {
         let mut s = [0u8; 32];
         getrandom::fill(&mut s).map_err(|e| e.to_string())?;
         #[cfg(target_os = "macos")]
-        store_open(email, &s)?;
+        { cli::set(email, &s)?; if let Ok(e) = entry(email) { let _ = e.delete_credential(); } }
         #[cfg(windows)]
         entry(email)?.set_secret(&s).map_err(|e| e.to_string())?;
         Ok(s)
@@ -116,12 +110,14 @@ pub fn new_secret(email: &str) -> Result<[u8; 32], String> {
 }
 
 pub fn secret(email: &str) -> Result<[u8; 32], String> {
+    #[cfg(target_os = "macos")]
+    if let Some(s) = cli::get(email) { return Ok(s); }
     #[cfg(any(target_os = "macos", windows))]
     {
         let s: [u8; 32] = entry(email)?.get_secret().map_err(|e| e.to_string())?.try_into().map_err(|_| "Secret illisible.".to_string())?;
-        // Migrate items created with the old per-build ACL (best effort).
+        // macOS: an item from before `cli` (this read may prompt one last time): move it, then drop the old one
         #[cfg(target_os = "macos")]
-        let _ = store_open(email, &s);
+        if cli::set(email, &s).is_ok() { let _ = entry(email).map(|e| e.delete_credential()); }
         Ok(s)
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -131,6 +127,23 @@ pub fn secret(email: &str) -> Result<[u8; 32], String> {
 pub fn clear_secret(email: &str) {
     #[cfg(any(target_os = "macos", windows))]
     if let Ok(e) = entry(email) { let _ = e.delete_credential(); }
+    #[cfg(target_os = "macos")]
+    cli::delete(email);
     #[cfg(not(any(target_os = "macos", windows)))]
     let _ = email;
+}
+
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn keychain_roundtrip() {
+        let e = "zz-roundtrip@example.invalid";
+        super::cli::set(e, &[9u8; 32]).unwrap();
+        assert_eq!(super::cli::get(e), Some([9u8; 32]));
+        super::cli::set(e, &[5u8; 32]).unwrap(); // update in place
+        assert_eq!(super::cli::get(e), Some([5u8; 32]));
+        super::cli::delete(e);
+        assert_eq!(super::cli::get(e), None);
+    }
 }

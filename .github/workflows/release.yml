@@ -98,7 +98,19 @@ jobs:
           sudo sed -i 's#mirror+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
           o="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
           sudo apt-get $o update
-          sudo apt-get $o install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get $o install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf qt6-base-dev cmake
+      - name: Build the Qt quick panel
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S native/linux/qt -B native/linux/qt/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/linux/qt/build
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: 8.0.x
+      - name: Build the WinUI quick panel
+        if: runner.os == 'Windows'
+        run: dotnet publish native/windows -c Release -r win-x64 -o native/windows/publish
       - name: Set version
         shell: bash
         run: |

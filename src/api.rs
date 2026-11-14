@@ -1,6 +1,6 @@
 //! Bitwarden-compatible server API: login (2FA, new-device OTP), sync + decrypt, and vault writes.
 use crate::crypto::{master_key, master_password_hash, Kdf, Key};
-use crate::vault::{Item, ItemInput, Vault};
+use crate::vault::{Hist, Item, ItemInput, Vault};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Map, Value};
 use std::{collections::{BTreeMap, HashMap}, time::Duration};
@@ -292,9 +292,13 @@ impl Session {
                 }
             }
             data.retain(|_, v| !v.is_empty());
+            let history = if kind != 1 { vec![] } else {
+                g(c, "passwordHistory").as_array().into_iter().flatten()
+                    .map(|h| Hist { password: d(h, "password"), date: gs(h, "lastUsedDate") }).filter(|h| !h.password.is_empty()).collect()
+            };
             let id = gs(c, "id");
             (if trashed { &mut trash } else { &mut items }).push(Item {
-                id: id.clone(), kind, name: d(c, "name"), notes: d(c, "notes"), data,
+                id: id.clone(), kind, name: d(c, "name"), notes: d(c, "notes"), data, history,
                 folder: names.get(gs(c, "folderId").as_str()).map(|s| s.to_string()).unwrap_or_default(),
             });
             self.ciphers.insert(id, c.clone());
@@ -386,7 +390,15 @@ impl Session {
         let k = self.cipher_key(&c)?;
         let enc = |s: &str| if s.is_empty() { Value::Null } else { json!(k.encrypt(s.as_bytes())) };
         let get = |f: &str| it.data.get(f).map(|s| s.as_str()).unwrap_or("");
+        // the password being replaced goes to the history, like the other Bitwarden clients (last 5 kept)
+        let old_pw = if it.kind == 1 && it.id.is_some() { k.decrypt_string(&gs(&c["login"], "password")).unwrap_or_default() } else { String::new() };
         let o = c.as_object_mut().ok_or("Élément invalide.")?;
+        if !old_pw.is_empty() && old_pw != get("password") {
+            let mut h = vec![json!({ "password": enc(&old_pw), "lastUsedDate": iso_now() })];
+            h.extend(o.get("passwordHistory").and_then(|x| x.as_array()).cloned().unwrap_or_default());
+            h.truncate(5);
+            o.insert("passwordHistory".into(), json!(h));
+        }
         o.insert("name".into(), enc(it.name.trim()));
         o.insert("notes".into(), enc(&it.notes));
         o.insert("folderId".into(), folder_id);
@@ -417,6 +429,21 @@ impl Session {
     }
 }
 
+/// Current UTC time as `2026-11-14T10:46:04.000Z` (civil-from-days, no date crate needed).
+fn iso_now() -> String {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, secs) = (t.div_euclid(86400), t.rem_euclid(86400));
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", secs / 3600, secs % 3600 / 60, secs % 60)
+}
+
 fn clean_path(p: &str) -> Result<String, String> {
     let parts: Vec<&str> = p.split('/').map(str::trim).collect();
     if parts.iter().all(|x| x.is_empty()) { return Ok(String::new()); }
@@ -433,6 +460,12 @@ mod tests {
         assert_eq!(server(2, "https://vw.example.com/").ok().unwrap().api, "https://vw.example.com/api");
         assert!(server(2, "").is_err());
         assert_eq!(server(1, "").ok().unwrap().identity, "https://identity.bitwarden.eu");
+    }
+    #[test]
+    fn iso_format() {
+        let s = iso_now();
+        assert_eq!((s.len(), &s[4..5], &s[10..11], &s[19..]), (24, "-", "T", ".000Z"));
+        assert!(s.starts_with("20"));
     }
     #[test]
     fn paths() {

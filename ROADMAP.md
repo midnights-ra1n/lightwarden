@@ -28,6 +28,6 @@ Ideas not built yet, roughly in priority order. Done items are in the README.
 ## Known gaps in what shipped
 
 - Auto-lock does not react to system sleep or screen lock yet (only inactivity and "Immediately" = window hidden or minimized).
-- Quick search is a global shortcut that brings the main window up with the search focused, not a separate Spotlight-style mini window.
+- Quick search is a global shortcut that brings the main window up with the search focused. The tray icon has its own native panel (Swift on macOS, WinUI 3 on Windows, Qt / GTK 4 on Linux); the Windows and Linux ones are untested, and on Linux they open from the tray menu entry "Quick search" and cannot be placed under the icon (no click events, GTK 4 cannot position windows).
 - Steam Guard (`steam://`) TOTP secrets are not supported.
 - The global shortcut is fixed (`Cmd/Ctrl+Shift+Space`); it is not configurable.
