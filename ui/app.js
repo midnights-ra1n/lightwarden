@@ -1278,7 +1278,7 @@ function openShortcuts() {
 }
 
 const SEL = {
-  timeout: ["Au redémarrage de l'application", 'Immédiatement', '1 minute', '5 minutes', '15 minutes', '1 heure', 'Jamais'],
+  timeout: ["Au redémarrage de l'application", 'Immédiatement', '1 minute', '5 minutes', '15 minutes', '1 heure', 'Jamais', 'Au verrouillage du système'],
   timeout_action: ['Verrouiller', 'Se déconnecter'],
   clipboard_clear: ['Jamais', '10 secondes', '20 secondes', '30 secondes', '1 minute', '2 minutes', '5 minutes'],
   ssh_approval: ['Toujours demander', "Se souvenir jusqu'au verrouillage du coffre", 'Ne jamais demander'],

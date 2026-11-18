@@ -2683,6 +2683,7 @@ dependencies = [
  "uuid",
  "windows",
  "windows-future",
+ "zbus 5.19.0",
 ]
 
 [[package]]

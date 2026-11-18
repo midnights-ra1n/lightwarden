@@ -82,7 +82,7 @@
     "Glissez un élément sur un dossier pour l'y déplacer, ou un dossier sur un autre pour l'imbriquer. Déposez un fichier de clé SSH n'importe où pour l'importer.":
       'Drag an item onto a folder to move it, or a folder onto another to nest it. Drop an SSH key file anywhere to import it.',
     // settings
-    "Au redémarrage de l'application": 'When the app restarts', 'Immédiatement': 'Immediately', '1 heure': '1 hour', 'Jamais': 'Never',
+    "Au redémarrage de l'application": 'When the app restarts', 'Immédiatement': 'Immediately', '1 heure': '1 hour', 'Jamais': 'Never', 'Au verrouillage du système': 'When the system locks',
     'Se déconnecter': 'Log out', '10 secondes': '10 seconds', '20 secondes': '20 seconds', '30 secondes': '30 seconds',
     'Toujours demander': 'Always ask', "Se souvenir jusqu'au verrouillage du coffre": 'Remember until the vault is locked', 'Ne jamais demander': 'Never ask',
     'Système': 'System', 'Clair': 'Light', 'Sombre': 'Dark', 'Par défaut': 'Default', 'Sécurité': 'Security', 'Préférences': 'Preferences',
