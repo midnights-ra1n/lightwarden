@@ -510,20 +510,24 @@ fn uptime() -> u64 { static T0: std::sync::OnceLock<std::time::Instant> = std::s
 #[tauri::command]
 fn activity() { LAST_INPUT.store(uptime(), std::sync::atomic::Ordering::Relaxed); }
 
-/// Session-timeout choices (see SEL.timeout in the UI): restart, immediately, 1 / 5 / 15 / 60 min, never.
+/// Session-timeout choices (see SEL.timeout in the UI): restart, immediately, 1 / 5 / 15 / 60 min, never, system lock.
+const ON_SYSTEM_LOCK: i32 = 7;
 fn idle_limit(choice: i32) -> Option<u64> { [None, Some(0), Some(60), Some(300), Some(900), Some(3600), None].get(choice as usize).copied().flatten() }
 
 /// Enforces each account's session timeout. "Immediately" = as soon as the window is hidden or minimized.
 fn watch_idle(app: AppHandle) {
+    #[cfg(not(target_os = "macos"))]
+    listen_system_lock();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         let idle = uptime().saturating_sub(LAST_INPUT.load(std::sync::atomic::Ordering::Relaxed));
         let away = app.get_webview_window("main").is_none_or(|w| !w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false));
         let state = app.state::<Mutex<App>>();
+        let sys_locked = system_locked(); // always read: consumes the pending lock event
         let mut a = state.lock().unwrap();
         let due: Vec<(String, bool)> = a.sessions.keys().filter_map(|e| {
             let st = &a.store.accounts.iter().find(|x| &x.email == e)?.settings;
-            let hit = match idle_limit(st.timeout)? { 0 => away, n => idle >= n };
+            let hit = if st.timeout == ON_SYSTEM_LOCK { sys_locked } else { match idle_limit(st.timeout)? { 0 => away, n => idle >= n } };
             hit.then(|| (e.clone(), st.timeout_action == 1))
         }).collect();
         if due.is_empty() { continue; }
@@ -535,6 +539,92 @@ fn watch_idle(app: AppHandle) {
         agent::forget(&app);
         let _ = app.emit("locked", ());
     });
+}
+
+/// Whether the OS session got locked since the last call. macOS: polls the lock screen state.
+#[cfg(target_os = "macos")]
+fn system_locked() -> bool {
+    use objc2_foundation::{NSDictionary, NSNumber, NSString};
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" { fn CGSessionCopyCurrentDictionary() -> *mut NSDictionary<NSString, objc2::runtime::AnyObject>; }
+    let Some(d) = (unsafe { objc2::rc::Retained::from_raw(CGSessionCopyCurrentDictionary()) }) else { return false };
+    d.objectForKey(&NSString::from_str("CGSSessionScreenIsLocked")).is_some_and(|v| v.downcast_ref::<NSNumber>().is_some_and(|n| n.boolValue()))
+}
+/// Windows / Linux: set by the OS lock events (listen_system_lock), consumed by system_locked.
+#[cfg(not(target_os = "macos"))]
+static SYS_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(not(target_os = "macos"))]
+fn system_locked() -> bool { SYS_LOCK.swap(false, std::sync::atomic::Ordering::Relaxed) }
+
+/// Like KeePassXC: session lock or console disconnect, sleep, lid closed.
+#[cfg(windows)]
+fn listen_system_lock() {
+    use windows::{core::w, Win32::{Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM}, System::{LibraryLoader::GetModuleHandleW, Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING}, RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION}, SystemServices::GUID_LIDSWITCH_STATE_CHANGE}, UI::WindowsAndMessaging::*}};
+    unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        let lock = match (msg, wp.0 as u32) {
+            (WM_WTSSESSION_CHANGE, e) => e == WTS_SESSION_LOCK || e == WTS_CONSOLE_DISCONNECT,
+            (WM_POWERBROADCAST, PBT_APMSUSPEND) => true,
+            // lid state: 0 = closed
+            (WM_POWERBROADCAST, PBT_POWERSETTINGCHANGE) => { let s = unsafe { &*(lp.0 as *const POWERBROADCAST_SETTING) }; s.PowerSetting == GUID_LIDSWITCH_STATE_CHANGE && s.Data[0] == 0 }
+            _ => false,
+        };
+        if lock { SYS_LOCK.store(true, std::sync::atomic::Ordering::Relaxed); }
+        unsafe { DefWindowProcW(h, msg, wp, lp) }
+    }
+    // a hidden top-level window: message-only windows don't get the power broadcasts
+    std::thread::spawn(|| unsafe {
+        let Ok(inst) = GetModuleHandleW(None) else { return };
+        let class = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst.into(), lpszClassName: w!("LightwardenLockListener"), ..Default::default() };
+        RegisterClassW(&class);
+        let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("LightwardenLockListener"), w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(inst.into()), None) else { return };
+        let _ = WTSRegisterSessionNotification(h, NOTIFY_FOR_THIS_SESSION);
+        let _ = RegisterPowerSettingNotification(HANDLE(h.0), &GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_WINDOW_HANDLE);
+        let mut m = MSG::default();
+        while GetMessageW(&mut m, None, 0, 0).as_bool() { DispatchMessageW(&m); }
+    });
+}
+
+/// Like KeePassXC: screensavers (freedesktop/KDE, GNOME, Xfce), GNOME idle presence, logind session lock and sleep.
+#[cfg(target_os = "linux")]
+fn listen_system_lock() {
+    use zbus::{blocking::{fdo::DBusProxy, Connection, MessageIterator}, message::Type, MatchRule};
+    type Sig = (&'static str, &'static str, Option<String>); // interface, member, object path
+    fn listen(system: bool) -> zbus::Result<()> {
+        let conn = if system { Connection::system()? } else { Connection::session()? };
+        let sigs: Vec<Sig> = if system {
+            let id = std::env::var("XDG_SESSION_ID").unwrap_or_else(|_| "auto".into());
+            let me = conn.call_method(Some("org.freedesktop.login1"), "/org/freedesktop/login1", Some("org.freedesktop.login1.Manager"), "GetSession", &(id,))
+                .and_then(|r| r.body().deserialize::<zbus::zvariant::OwnedObjectPath>());
+            let mut v = vec![("org.freedesktop.login1.Manager", "PrepareForSleep", None)];
+            if let Ok(p) = me { v.push(("org.freedesktop.login1.Session", "Lock", Some(p.as_str().to_owned()))); }
+            v
+        } else {
+            vec![("org.freedesktop.ScreenSaver", "ActiveChanged", None), ("org.gnome.ScreenSaver", "ActiveChanged", None),
+                 ("org.xfce.ScreenSaver", "ActiveChanged", None), ("org.gnome.SessionManager.Presence", "StatusChanged", None)]
+        };
+        let bus = DBusProxy::new(&conn)?;
+        for (i, m, p) in &sigs {
+            let mut r = MatchRule::builder().msg_type(Type::Signal).interface(*i)?.member(*m)?;
+            if let Some(p) = p { r = r.path(p.as_str())?; }
+            bus.add_match_rule(r.build())?;
+        }
+        for msg in MessageIterator::from(&conn) {
+            let msg = msg?;
+            let h = msg.header();
+            let (Some(i), Some(m)) = (h.interface(), h.member()) else { continue };
+            let path = h.path().map(|x| x.as_str());
+            if !sigs.iter().any(|(si, sm, sp)| i.as_str() == *si && m.as_str() == *sm && sp.as_deref().is_none_or(|p| path == Some(p))) { continue; }
+            let b = msg.body();
+            let hit = match m.as_str() {
+                "Lock" => true,
+                "StatusChanged" => b.deserialize::<u32>().is_ok_and(|s| s == 3), // 3 = idle
+                _ => b.deserialize::<bool>().unwrap_or(false), // ActiveChanged / PrepareForSleep(true)
+            };
+            if hit { SYS_LOCK.store(true, std::sync::atomic::Ordering::Relaxed); }
+        }
+        Ok(())
+    }
+    for system in [false, true] { std::thread::spawn(move || listen(system)); }
 }
 
 #[tauri::command]
