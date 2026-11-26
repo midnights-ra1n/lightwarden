@@ -211,8 +211,9 @@ fn auto_update(app: &AppHandle) -> bool {
 fn update_info(app: AppHandle) -> updater::Info { updater::info(&app) }
 #[tauri::command]
 async fn update_check(app: AppHandle) { let d = auto_update(&app); updater::check(app, d).await }
+// async: a sync command runs on the main thread, and building a window from there deadlocks WebView2 on Windows (blank window)
 #[tauri::command]
-fn update_install(app: AppHandle) { updater::begin_install(&app) }
+async fn update_install(app: AppHandle) { updater::begin_install(&app) }
 #[tauri::command]
 fn french() -> bool { updater::french() }
 
