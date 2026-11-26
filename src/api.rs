@@ -393,6 +393,8 @@ impl Session {
         // the password being replaced goes to the history, like the other Bitwarden clients (last 5 kept)
         let old_pw = if it.kind == 1 && it.id.is_some() { k.decrypt_string(&gs(&c["login"], "password")).unwrap_or_default() } else { String::new() };
         let o = c.as_object_mut().ok_or("Élément invalide.")?;
+        // owner's id, sent by the official clients; Vaultwarden 1.37 requires it on every cipher write (else HTTP 422)
+        o.insert("encryptedFor".into(), g(g(&self.raw, "profile"), "id").clone());
         if !old_pw.is_empty() && old_pw != get("password") {
             let mut h = vec![json!({ "password": enc(&old_pw), "lastUsedDate": iso_now() })];
             h.extend(o.get("passwordHistory").and_then(|x| x.as_array()).cloned().unwrap_or_default());
